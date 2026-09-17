@@ -2,9 +2,11 @@
 
 from ._trading_engine import (
     Account,
+    AssetConfig,
     Engine,
     LevelQuote,
     MarketDepth,
+    MultiAssetMarketSim,
     Order,
     OrderStatus,
     OrderType,
@@ -17,9 +19,11 @@ from ._trading_engine import (
 
 __all__ = [
     "Account",
+    "AssetConfig",
     "Engine",
     "LevelQuote",
     "MarketDepth",
+    "MultiAssetMarketSim",
     "Order",
     "OrderStatus",
     "OrderType",

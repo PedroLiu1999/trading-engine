@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod market_sim;
 pub mod types;
 
 use pyo3::prelude::*;
@@ -16,5 +17,7 @@ pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::PyPosition>()?;
     m.add_class::<types::PyAccount>()?;
     m.add_class::<types::PyRiskConfig>()?;
+    m.add_class::<market_sim::PyAssetConfig>()?;
+    m.add_class::<market_sim::PyMultiAssetMarketSim>()?;
     Ok(())
 }

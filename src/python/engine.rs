@@ -17,6 +17,12 @@ pub struct PyEngine {
     event_rx: Mutex<Receiver<EngineEvent>>,
 }
 
+impl PyEngine {
+    pub fn inner(&self) -> Arc<ExecutionEngine> {
+        Arc::clone(&self.engine)
+    }
+}
+
 #[pymethods]
 impl PyEngine {
     #[new]

@@ -1,5 +1,6 @@
 pub mod event_bus;
 pub mod execution_engine;
+pub mod market_sim;
 pub mod order_book;
 pub mod position_manager;
 pub mod risk_manager;
@@ -11,6 +12,7 @@ pub mod python;
 // Re-exports for Rust library consumers
 pub use event_bus::{EngineEvent, EventBus};
 pub use execution_engine::{ExecutionEngine, ExecutionError};
+pub use market_sim::{AssetConfig, MultiAssetMarketSim};
 pub use order_book::{MatchResult, OrderBook};
 pub use position_manager::{Account, Position, PositionManager};
 pub use risk_manager::{RiskConfig, RiskManager, RiskRejection};

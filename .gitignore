@@ -1,0 +1,33 @@
+# Rust build artifacts
+/target
+Cargo.lock
+
+# Python build artifacts and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.dylib
+.venv/
+env/
+venv/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

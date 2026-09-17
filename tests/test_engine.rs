@@ -118,6 +118,8 @@ fn test_position_pnl_scale_in_and_close() {
         execution_id: 1,
         maker_order_id: 1,
         taker_order_id: 2,
+        maker_account_id: "SIM_MM".to_string(),
+        taker_account_id: "DEFAULT".to_string(),
         symbol: "TEST".to_string(),
         side: Side::Buy,
         price: 100.0,
@@ -125,9 +127,9 @@ fn test_position_pnl_scale_in_and_close() {
         fee: 0.0,
         timestamp: 0,
     };
-    pm.on_trade(&t1, Side::Buy);
+    pm.on_trade("DEFAULT", &t1, Side::Buy);
 
-    let pos = pm.get_position("TEST").unwrap();
+    let pos = pm.get_position("DEFAULT", "TEST").unwrap();
     assert_eq!(pos.quantity, 10.0);
     assert_eq!(pos.avg_entry_price, 100.0);
 
@@ -136,6 +138,8 @@ fn test_position_pnl_scale_in_and_close() {
         execution_id: 2,
         maker_order_id: 3,
         taker_order_id: 4,
+        maker_account_id: "SIM_MM".to_string(),
+        taker_account_id: "DEFAULT".to_string(),
         symbol: "TEST".to_string(),
         side: Side::Buy,
         price: 120.0,
@@ -143,9 +147,9 @@ fn test_position_pnl_scale_in_and_close() {
         fee: 0.0,
         timestamp: 0,
     };
-    pm.on_trade(&t2, Side::Buy);
+    pm.on_trade("DEFAULT", &t2, Side::Buy);
 
-    let pos = pm.get_position("TEST").unwrap();
+    let pos = pm.get_position("DEFAULT", "TEST").unwrap();
     assert_eq!(pos.quantity, 20.0);
     assert_eq!(pos.avg_entry_price, 110.0);
 
@@ -154,6 +158,8 @@ fn test_position_pnl_scale_in_and_close() {
         execution_id: 3,
         maker_order_id: 5,
         taker_order_id: 6,
+        maker_account_id: "SIM_MM".to_string(),
+        taker_account_id: "DEFAULT".to_string(),
         symbol: "TEST".to_string(),
         side: Side::Sell,
         price: 130.0,
@@ -161,20 +167,23 @@ fn test_position_pnl_scale_in_and_close() {
         fee: 0.0,
         timestamp: 0,
     };
-    pm.on_trade(&t3, Side::Sell);
+    pm.on_trade("DEFAULT", &t3, Side::Sell);
 
-    let pos = pm.get_position("TEST").unwrap();
+    let pos = pm.get_position("DEFAULT", "TEST").unwrap();
     assert_eq!(pos.quantity, 10.0);
     assert_eq!(pos.avg_entry_price, 110.0);
     assert_eq!(pos.realized_pnl, 200.0);
 
     // Mark to market at 140 -> Unrealized PnL = 10 * (140 - 110) = +300
     pm.mark_to_market("TEST", 140.0);
-    let pos = pm.get_position("TEST").unwrap();
+    let pos = pm.get_position("DEFAULT", "TEST").unwrap();
     assert_eq!(pos.unrealized_pnl, 300.0);
 
     // Total account equity
-    assert_eq!(pm.account().equity(pm.total_unrealized_pnl()), 100_000.0 + 200.0 + 300.0);
+    assert_eq!(
+        pm.default_account().equity(pm.total_unrealized_pnl("DEFAULT")),
+        100_000.0 + 200.0 + 300.0
+    );
 }
 
 #[test]
@@ -236,12 +245,21 @@ fn test_execution_engine_integrated_flow() {
 
     engine.register_symbol("BTC-USD", 1.0, 0.001);
 
-    // Provide liquidity
+    // Provide liquidity with a market maker account
     engine
-        .submit_order(None, "BTC-USD", Side::Sell, OrderType::Limit, 50_000.0, 2.0, TimeInForce::GTC)
+        .submit_order_with_account(
+            None,
+            Some("LIQUIDITY_PROVIDER".to_string()),
+            "BTC-USD",
+            Side::Sell,
+            OrderType::Limit,
+            50_000.0,
+            2.0,
+            TimeInForce::GTC,
+        )
         .unwrap();
 
-    // Take liquidity
+    // Take liquidity with default trader account
     let buy = engine
         .submit_order(Some("taker_1".to_string()), "BTC-USD", Side::Buy, OrderType::Market, 0.0, 1.0, TimeInForce::IOC)
         .unwrap();

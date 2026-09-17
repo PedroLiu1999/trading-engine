@@ -116,16 +116,16 @@ def run_stat_arb_simulation():
         eth_qty = eth_pos.quantity if eth_pos else 0.0
 
         action = "HOLD"
-        # If ETH is relatively underpriced (>1.5% below ratio), buy ETH and sell equivalent BTC
-        if deviation_pct < -1.0 and eth_qty <= 0.0:
+        # If ETH is relatively underpriced, buy ETH and sell equivalent BTC
+        if deviation_pct < -0.005 and eth_qty <= 0.0:
             action = "LONG ETH / SHORT BTC (Arbitrage Entry)"
             engine.submit_order("ETH-USDT", "BUY", "MARKET", 0.0, 5.0, "IOC")
             engine.submit_order("BTC-USDT", "SELL", "MARKET", 0.0, 0.25, "IOC")
-        elif deviation_pct > 1.0 and eth_qty >= 0.0:
+        elif deviation_pct > 0.015 and eth_qty >= 0.0:
             action = "SHORT ETH / LONG BTC (Arbitrage Entry)"
             engine.submit_order("ETH-USDT", "SELL", "MARKET", 0.0, 5.0, "IOC")
             engine.submit_order("BTC-USDT", "BUY", "MARKET", 0.0, 0.25, "IOC")
-        elif abs(deviation_pct) < 0.3 and abs(eth_qty) > 0.0:
+        elif abs(deviation_pct) < 0.005 and abs(eth_qty) > 0.0:
             action = "CLOSE ARB (Ratio Reverted)"
             if eth_qty > 0.0:
                 engine.submit_order("ETH-USDT", "SELL", "MARKET", 0.0, abs(eth_qty), "IOC")
@@ -140,17 +140,32 @@ def run_stat_arb_simulation():
         )
 
     # 5. Final Portfolio Summary
-    acct = engine.get_account()
-    positions = engine.get_positions()
+    acct = engine.get_account("DEFAULT")
+    positions = engine.get_positions("DEFAULT")
     print("\n" + "=" * 70)
-    print("Simulation Complete - Final Portfolio Summary:")
-    print(f"Cash Balance: ${acct.cash_balance:,.2f}")
-    for pos in positions:
-        print(
-            f"  {pos.symbol:<8}: Qty={pos.quantity:>6.2f} | "
-            f"Realized PnL=${pos.realized_pnl:>+8.2f} | "
-            f"Unrealized PnL=${pos.unrealized_pnl:>+8.2f}"
-        )
+    print("Simulation Complete - Strategy Account Summary (Isolated):")
+    print(
+        f"Strategy Cash Balance: ${acct.cash_balance:,.2f} | "
+        f"Realized PnL: ${acct.realized_pnl:>+8.2f}"
+    )
+    if positions:
+        for pos in positions:
+            print(
+                f"  {pos.symbol:<8}: Qty={pos.quantity:>6.2f} | "
+                f"Realized PnL=${pos.realized_pnl:>+8.2f} | "
+                f"Unrealized PnL=${pos.unrealized_pnl:>+8.2f}"
+            )
+    else:
+        print("  (All arbitrage positions closed flat)")
+
+    print("\nSimulator Internal Accounts (Isolated):")
+    for acct_id in sorted(engine.get_all_account_ids()):
+        if acct_id != "DEFAULT":
+            sim_acct = engine.get_account(acct_id)
+            print(
+                f"  Account [{acct_id:<9}]: Cash=${sim_acct.cash_balance:,.2f} | "
+                f"Realized PnL=${sim_acct.realized_pnl:>+8.2f}"
+            )
     print("=" * 70)
 
 

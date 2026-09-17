@@ -285,6 +285,8 @@ impl OrderBook {
                 execution_id: exec_id,
                 maker_order_id: maker.id,
                 taker_order_id: taker.id,
+                maker_account_id: maker.account_id.clone(),
+                taker_account_id: taker.account_id.clone(),
                 symbol: self.symbol.clone(),
                 side: taker.side,
                 price: exec_price,

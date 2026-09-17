@@ -76,15 +76,40 @@ impl ExecutionEngine {
         quantity: f64,
         time_in_force: TimeInForce,
     ) -> Result<Order, ExecutionError> {
+        self.submit_order_with_account(
+            client_order_id,
+            Some("DEFAULT".to_string()),
+            symbol,
+            side,
+            order_type,
+            price,
+            quantity,
+            time_in_force,
+        )
+    }
+
+    pub fn submit_order_with_account(
+        &self,
+        client_order_id: Option<String>,
+        account_id: Option<String>,
+        symbol: &str,
+        side: Side,
+        order_type: OrderType,
+        price: f64,
+        quantity: f64,
+        time_in_force: TimeInForce,
+    ) -> Result<Order, ExecutionError> {
         let mut books = self.books.write();
         let book = books
             .get_mut(symbol)
             .ok_or_else(|| ExecutionError::SymbolNotRegistered(symbol.to_string()))?;
 
+        let acct_id = account_id.unwrap_or_else(|| "DEFAULT".to_string());
         let order_id = self.next_order_id();
-        let mut order = Order::new(
+        let mut order = Order::new_with_account(
             order_id,
             client_order_id.clone(),
+            &acct_id,
             symbol,
             side,
             order_type,
@@ -99,16 +124,16 @@ impl ExecutionEngine {
 
         // Pre-trade Risk Check
         let mid_price = book.mid_price();
-        let unrealized_pnl = self.position_manager.read().total_unrealized_pnl();
+        let unrealized_pnl = self.position_manager.read().total_unrealized_pnl(&acct_id);
 
         {
             let mut risk = self.risk_manager.write();
-            let pos_mgr = self.position_manager.read();
-            let current_pos = pos_mgr.get_position(symbol);
-            let account = pos_mgr.account();
+            let mut pos_mgr = self.position_manager.write();
+            let current_pos = pos_mgr.get_position(&acct_id, symbol).cloned();
+            let account = pos_mgr.get_or_create_account(&acct_id).clone();
 
             if let Err(rejection) =
-                risk.check_order(&order, account, current_pos, mid_price, unrealized_pnl)
+                risk.check_order(&order, &account, current_pos.as_ref(), mid_price, unrealized_pnl)
             {
                 order.status = OrderStatus::Rejected;
                 self.event_bus.publish(EngineEvent::RiskBreached {
@@ -140,7 +165,9 @@ impl ExecutionEngine {
 
             for trade in &match_result.trades {
                 // Update position for taker
-                pos_mgr.on_trade(trade, trade.side);
+                pos_mgr.on_trade(&trade.taker_account_id, trade, trade.side);
+                // Update position for maker
+                pos_mgr.on_trade(&trade.maker_account_id, trade, trade.side.opposite());
 
                 // Publish trade events
                 self.event_bus
@@ -159,7 +186,7 @@ impl ExecutionEngine {
                 pos_mgr.mark_to_market(symbol, last_trade.price);
             }
 
-            if let Some(pos) = pos_mgr.get_position(symbol) {
+            if let Some(pos) = pos_mgr.get_position(&acct_id, symbol) {
                 self.event_bus.publish(EngineEvent::PositionUpdated {
                     symbol: symbol.to_string(),
                     quantity: pos.quantity,
@@ -169,21 +196,26 @@ impl ExecutionEngine {
                 });
             }
 
-            let acct = pos_mgr.account();
-            self.event_bus.publish(EngineEvent::AccountUpdated {
-                cash_balance: acct.cash_balance,
-                equity: acct.equity(pos_mgr.total_unrealized_pnl()),
-                realized_pnl: acct.realized_pnl,
-                unrealized_pnl: pos_mgr.total_unrealized_pnl(),
-            });
-
-            // Post-trade Risk: Check portfolio drawdown
-            let mut risk = self.risk_manager.write();
-            if risk.check_drawdown(pos_mgr.account(), pos_mgr.total_unrealized_pnl()) {
-                self.event_bus.publish(EngineEvent::SystemAlert {
-                    level: "CRITICAL".to_string(),
-                    message: "Kill switch triggered by maximum drawdown breach".to_string(),
+            if let Some(acct) = pos_mgr.get_account(&acct_id) {
+                let un_pnl = pos_mgr.total_unrealized_pnl(&acct_id);
+                self.event_bus.publish(EngineEvent::AccountUpdated {
+                    cash_balance: acct.cash_balance,
+                    equity: acct.equity(un_pnl),
+                    realized_pnl: acct.realized_pnl,
+                    unrealized_pnl: un_pnl,
                 });
+
+                // Post-trade Risk: Check portfolio drawdown
+                let mut risk = self.risk_manager.write();
+                if risk.check_drawdown(acct, un_pnl) {
+                    self.event_bus.publish(EngineEvent::SystemAlert {
+                        level: "CRITICAL".to_string(),
+                        message: format!(
+                            "Kill switch triggered by maximum drawdown breach on account '{}'",
+                            acct_id
+                        ),
+                    });
+                }
             }
         }
 
@@ -247,7 +279,24 @@ impl ExecutionEngine {
     }
 
     pub fn get_position(&self, symbol: &str) -> Option<Position> {
-        self.position_manager.read().get_position(symbol).cloned()
+        self.get_position_by_account("DEFAULT", symbol)
+    }
+
+    pub fn get_position_by_account(&self, account_id: &str, symbol: &str) -> Option<Position> {
+        self.position_manager
+            .read()
+            .get_position(account_id, symbol)
+            .cloned()
+    }
+
+    pub fn get_positions(&self) -> Vec<Position> {
+        self.get_positions_by_account("DEFAULT")
+    }
+
+    pub fn get_positions_by_account(&self, account_id: &str) -> Vec<Position> {
+        self.position_manager
+            .read()
+            .get_positions_by_account(account_id)
     }
 
     pub fn get_all_positions(&self) -> Vec<Position> {
@@ -255,7 +304,19 @@ impl ExecutionEngine {
     }
 
     pub fn get_account(&self) -> Account {
-        self.position_manager.read().account().clone()
+        self.get_account_by_id("DEFAULT")
+            .unwrap_or_else(|| self.position_manager.read().default_account().clone())
+    }
+
+    pub fn get_account_by_id(&self, account_id: &str) -> Option<Account> {
+        self.position_manager
+            .read()
+            .get_account(account_id)
+            .cloned()
+    }
+
+    pub fn get_all_account_ids(&self) -> Vec<String> {
+        self.position_manager.read().get_all_account_ids()
     }
 
     pub fn get_risk_config(&self) -> RiskConfig {

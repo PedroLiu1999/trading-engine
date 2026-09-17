@@ -85,7 +85,7 @@ def test_order_submission_and_depth(engine):
 
 
 def test_market_order_fill_and_position(engine):
-    # Provide resting ask liquidity
+    # Provide resting ask liquidity with MAKER account
     engine.submit_order(
         symbol="BTC-USDT",
         side="SELL",
@@ -93,9 +93,10 @@ def test_market_order_fill_and_position(engine):
         price=50_000.0,
         quantity=0.5,
         time_in_force="GTC",
+        account_id="MAKER",
     )
 
-    # Execute market buy
+    # Execute market buy with default trader account
     taker = engine.submit_order(
         symbol="BTC-USDT",
         side="BUY",
@@ -112,6 +113,10 @@ def test_market_order_fill_and_position(engine):
     assert pos.quantity == 0.5
     assert pos.avg_entry_price == 50_000.0
     assert pos.is_long() is True
+
+    maker_pos = engine.get_position("BTC-USDT", account_id="MAKER")
+    assert maker_pos is not None
+    assert maker_pos.quantity == -0.5
 
 
 def test_price_collar_risk_rejection(engine):

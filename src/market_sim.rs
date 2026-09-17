@@ -232,8 +232,9 @@ impl MultiAssetMarketSim {
                 let qty = (asset.avg_order_qty * (1.0 + 0.5 * (level as f64)) / asset.lot_size).round()
                     * asset.lot_size;
 
-                if let Ok(bid) = self.engine.submit_order(
+                if let Ok(bid) = self.engine.submit_order_with_account(
                     Some(format!("mm_bid_{}_{}", asset.symbol, level)),
+                    Some("SIM_MM".to_string()),
                     &asset.symbol,
                     Side::Buy,
                     OrderType::Limit,
@@ -244,8 +245,9 @@ impl MultiAssetMarketSim {
                     new_ids.push(bid.id);
                 }
 
-                if let Ok(ask) = self.engine.submit_order(
+                if let Ok(ask) = self.engine.submit_order_with_account(
                     Some(format!("mm_ask_{}_{}", asset.symbol, level)),
+                    Some("SIM_MM".to_string()),
                     &asset.symbol,
                     Side::Sell,
                     OrderType::Limit,
@@ -273,8 +275,9 @@ impl MultiAssetMarketSim {
 
                 if qty > 0.0 {
                     let side = if is_buy { Side::Buy } else { Side::Sell };
-                    let _ = self.engine.submit_order(
+                    let _ = self.engine.submit_order_with_account(
                         Some(format!("noise_{}_{}", asset.symbol, self.step_count)),
+                        Some("SIM_NOISE".to_string()),
                         &asset.symbol,
                         side,
                         OrderType::Market,

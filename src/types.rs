@@ -82,6 +82,7 @@ impl fmt::Display for OrderStatus {
 pub struct Order {
     pub id: OrderId,
     pub client_order_id: Option<String>,
+    pub account_id: String,
     pub symbol: String,
     pub side: Side,
     pub order_type: OrderType,
@@ -106,10 +107,35 @@ impl Order {
         quantity: f64,
         time_in_force: TimeInForce,
     ) -> Self {
+        Self::new_with_account(
+            id,
+            client_order_id,
+            "DEFAULT",
+            symbol,
+            side,
+            order_type,
+            price,
+            quantity,
+            time_in_force,
+        )
+    }
+
+    pub fn new_with_account(
+        id: OrderId,
+        client_order_id: Option<String>,
+        account_id: impl Into<String>,
+        symbol: impl Into<String>,
+        side: Side,
+        order_type: OrderType,
+        price: f64,
+        quantity: f64,
+        time_in_force: TimeInForce,
+    ) -> Self {
         let now = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         Self {
             id,
             client_order_id,
+            account_id: account_id.into(),
             symbol: symbol.into(),
             side,
             order_type,
@@ -146,6 +172,8 @@ pub struct Trade {
     pub execution_id: ExecutionId,
     pub maker_order_id: OrderId,
     pub taker_order_id: OrderId,
+    pub maker_account_id: String,
+    pub taker_account_id: String,
     pub symbol: String,
     pub side: Side, // Taker side
     pub price: f64,

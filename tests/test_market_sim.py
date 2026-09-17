@@ -65,8 +65,8 @@ def test_strategy_trading_against_simulated_market(sim_setup):
     # Run initial steps to create market liquidity
     sim.run_steps(count=3, dt=1.0)
 
-    initial_pos = engine.get_position("BTC-USDT")
-    initial_qty = initial_pos.quantity if initial_pos else 0.0
+    # Strategy account starts clean with 0 position
+    assert engine.get_position("BTC-USDT") is None
 
     # Strategy buys 0.1 BTC using a market order
     order = engine.submit_order(
@@ -81,4 +81,5 @@ def test_strategy_trading_against_simulated_market(sim_setup):
 
     pos = engine.get_position("BTC-USDT")
     assert pos is not None
-    assert pos.quantity == pytest.approx(initial_qty + 0.1)
+    assert pos.quantity == 0.1
+    assert pos.is_long() is True

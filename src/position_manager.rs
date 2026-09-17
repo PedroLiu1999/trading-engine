@@ -158,80 +158,143 @@ impl Account {
 }
 
 pub struct PositionManager {
-    positions: HashMap<String, Position>,
-    account: Account,
+    default_initial_balance: f64,
+    default_leverage: f64,
+    accounts: HashMap<String, Account>,
+    positions: HashMap<(String, String), Position>, // (account_id, symbol) -> Position
 }
 
 impl PositionManager {
     pub fn new(initial_balance: f64, leverage: f64) -> Self {
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "DEFAULT".to_string(),
+            Account::new(initial_balance, leverage),
+        );
         Self {
+            default_initial_balance: initial_balance,
+            default_leverage: leverage,
+            accounts,
             positions: HashMap::new(),
-            account: Account::new(initial_balance, leverage),
         }
     }
 
-    pub fn get_position(&self, symbol: &str) -> Option<&Position> {
-        self.positions.get(symbol)
+    pub fn get_or_create_account(&mut self, account_id: &str) -> &mut Account {
+        let init_bal = self.default_initial_balance;
+        let lev = self.default_leverage;
+        self.accounts
+            .entry(account_id.to_string())
+            .or_insert_with(|| Account::new(init_bal, lev))
     }
 
-    pub fn get_or_create_position(&mut self, symbol: &str) -> &mut Position {
+    pub fn get_account(&self, account_id: &str) -> Option<&Account> {
+        self.accounts.get(account_id)
+    }
+
+    pub fn get_account_mut(&mut self, account_id: &str) -> Option<&mut Account> {
+        self.accounts.get_mut(account_id)
+    }
+
+    pub fn default_account(&self) -> &Account {
+        self.accounts
+            .get("DEFAULT")
+            .expect("DEFAULT account must exist")
+    }
+
+    pub fn get_position(&self, account_id: &str, symbol: &str) -> Option<&Position> {
         self.positions
-            .entry(symbol.to_string())
+            .get(&(account_id.to_string(), symbol.to_string()))
+    }
+
+    pub fn get_or_create_position(&mut self, account_id: &str, symbol: &str) -> &mut Position {
+        self.positions
+            .entry((account_id.to_string(), symbol.to_string()))
             .or_insert_with(|| Position::new(symbol))
+    }
+
+    pub fn get_positions_by_account(&self, account_id: &str) -> Vec<Position> {
+        self.positions
+            .iter()
+            .filter(|((acct, _), _)| acct == account_id)
+            .map(|(_, pos)| pos.clone())
+            .collect()
     }
 
     pub fn get_all_positions(&self) -> Vec<Position> {
         self.positions.values().cloned().collect()
     }
 
-    pub fn account(&self) -> &Account {
-        &self.account
+    pub fn get_all_account_ids(&self) -> Vec<String> {
+        self.accounts.keys().cloned().collect()
     }
 
-    pub fn account_mut(&mut self) -> &mut Account {
-        &mut self.account
+    pub fn total_unrealized_pnl(&self, account_id: &str) -> f64 {
+        self.positions
+            .iter()
+            .filter(|((acct, _), _)| acct == account_id)
+            .map(|(_, pos)| pos.unrealized_pnl)
+            .sum()
     }
 
-    pub fn total_unrealized_pnl(&self) -> f64 {
-        self.positions.values().map(|p| p.unrealized_pnl).sum()
+    pub fn total_realized_pnl(&self, account_id: &str) -> f64 {
+        self.positions
+            .iter()
+            .filter(|((acct, _), _)| acct == account_id)
+            .map(|(_, pos)| pos.realized_pnl)
+            .sum()
     }
 
-    pub fn total_realized_pnl(&self) -> f64 {
-        self.positions.values().map(|p| p.realized_pnl).sum()
-    }
-
-    pub fn on_trade(&mut self, trade: &Trade, side: Side) {
+    pub fn on_trade(&mut self, account_id: &str, trade: &Trade, side: Side) {
         let prev_realized = self
             .positions
-            .get(&trade.symbol)
+            .get(&(account_id.to_string(), trade.symbol.clone()))
             .map(|p| p.realized_pnl)
             .unwrap_or(0.0);
 
-        let pos = self.get_or_create_position(&trade.symbol);
+        let pos = self.get_or_create_position(account_id, &trade.symbol);
         pos.apply_trade(side, trade.price, trade.quantity, trade.fee);
 
         let new_realized = pos.realized_pnl;
         let pnl_diff = new_realized - prev_realized;
 
-        self.account.cash_balance += pnl_diff;
-        self.account.realized_pnl += pnl_diff;
+        let acct = self.get_or_create_account(account_id);
+        acct.cash_balance += pnl_diff;
+        acct.realized_pnl += pnl_diff;
 
-        self.recalculate_margin();
+        self.recalculate_margin(account_id);
     }
 
     pub fn mark_to_market(&mut self, symbol: &str, current_price: f64) {
-        if let Some(pos) = self.positions.get_mut(symbol) {
-            pos.mark_to_market(current_price);
+        let mut affected_accounts = Vec::new();
+        for ((acct_id, sym), pos) in &mut self.positions {
+            if sym == symbol {
+                pos.mark_to_market(current_price);
+                affected_accounts.push(acct_id.clone());
+            }
         }
-        self.recalculate_margin();
+
+        for acct_id in affected_accounts {
+            self.recalculate_margin(&acct_id);
+        }
     }
 
-    pub fn recalculate_margin(&mut self) {
+    pub fn recalculate_margin(&mut self, account_id: &str) {
+        let leverage = self
+            .accounts
+            .get(account_id)
+            .map(|a| a.leverage)
+            .unwrap_or(1.0);
+
         let mut total_margin = 0.0;
-        for pos in self.positions.values() {
-            let notional = pos.quantity.abs() * pos.avg_entry_price;
-            total_margin += notional / self.account.leverage;
+        for ((acct, _), pos) in &self.positions {
+            if acct == account_id {
+                let notional = pos.quantity.abs() * pos.avg_entry_price;
+                total_margin += notional / leverage;
+            }
         }
-        self.account.margin_used = total_margin;
+
+        if let Some(acct) = self.accounts.get_mut(account_id) {
+            acct.margin_used = total_margin;
+        }
     }
 }

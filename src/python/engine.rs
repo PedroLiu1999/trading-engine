@@ -51,7 +51,8 @@ impl PyEngine {
         price,
         quantity,
         time_in_force="GTC",
-        client_order_id=None
+        client_order_id=None,
+        account_id=None
     ))]
     fn submit_order(
         &self,
@@ -62,6 +63,7 @@ impl PyEngine {
         quantity: f64,
         time_in_force: &str,
         client_order_id: Option<String>,
+        account_id: Option<String>,
     ) -> PyResult<PyOrder> {
         let parsed_side = match side.to_uppercase().as_str() {
             "BUY" | "B" => Side::Buy,
@@ -98,8 +100,9 @@ impl PyEngine {
         };
 
         self.engine
-            .submit_order(
+            .submit_order_with_account(
                 client_order_id,
+                account_id,
                 symbol,
                 parsed_side,
                 parsed_type,
@@ -123,11 +126,23 @@ impl PyEngine {
         self.engine.get_depth(symbol, levels).map(Into::into)
     }
 
-    fn get_position(&self, symbol: &str) -> Option<PyPosition> {
-        self.engine.get_position(symbol).map(Into::into)
+    #[pyo3(signature = (symbol, account_id="DEFAULT"))]
+    fn get_position(&self, symbol: &str, account_id: &str) -> Option<PyPosition> {
+        self.engine
+            .get_position_by_account(account_id, symbol)
+            .map(Into::into)
     }
 
-    fn get_positions(&self) -> Vec<PyPosition> {
+    #[pyo3(signature = (account_id="DEFAULT"))]
+    fn get_positions(&self, account_id: &str) -> Vec<PyPosition> {
+        self.engine
+            .get_positions_by_account(account_id)
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn get_all_positions(&self) -> Vec<PyPosition> {
         self.engine
             .get_all_positions()
             .into_iter()
@@ -135,8 +150,13 @@ impl PyEngine {
             .collect()
     }
 
-    fn get_account(&self) -> PyAccount {
-        self.engine.get_account().into()
+    #[pyo3(signature = (account_id="DEFAULT"))]
+    fn get_account(&self, account_id: &str) -> Option<PyAccount> {
+        self.engine.get_account_by_id(account_id).map(Into::into)
+    }
+
+    fn get_all_account_ids(&self) -> Vec<String> {
+        self.engine.get_all_account_ids()
     }
 
     fn get_risk_config(&self) -> PyRiskConfig {

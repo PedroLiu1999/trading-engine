@@ -157,6 +157,8 @@ pub struct PyOrder {
     #[pyo3(get)]
     pub client_order_id: Option<String>,
     #[pyo3(get)]
+    pub account_id: String,
+    #[pyo3(get)]
     pub symbol: String,
     #[pyo3(get)]
     pub side: PySide,
@@ -185,6 +187,7 @@ impl From<Order> for PyOrder {
         Self {
             id: o.id,
             client_order_id: o.client_order_id,
+            account_id: o.account_id,
             symbol: o.symbol,
             side: o.side.into(),
             order_type: o.order_type.into(),
@@ -211,8 +214,9 @@ impl PyOrder {
 
     fn __repr__(&self) -> String {
         format!(
-            "Order(id={}, symbol='{}', side={:?}, price={}, qty={}, filled={}, remaining={}, status={:?})",
+            "Order(id={}, acct='{}', symbol='{}', side={:?}, price={}, qty={}, filled={}, remaining={}, status={:?})",
             self.id,
+            self.account_id,
             self.symbol,
             self.side.__repr__(),
             self.price,
@@ -234,6 +238,10 @@ pub struct PyTrade {
     #[pyo3(get)]
     pub taker_order_id: u64,
     #[pyo3(get)]
+    pub maker_account_id: String,
+    #[pyo3(get)]
+    pub taker_account_id: String,
+    #[pyo3(get)]
     pub symbol: String,
     #[pyo3(get)]
     pub side: PySide,
@@ -253,6 +261,8 @@ impl From<Trade> for PyTrade {
             execution_id: t.execution_id,
             maker_order_id: t.maker_order_id,
             taker_order_id: t.taker_order_id,
+            maker_account_id: t.maker_account_id,
+            taker_account_id: t.taker_account_id,
             symbol: t.symbol,
             side: t.side.into(),
             price: t.price,

@@ -77,7 +77,14 @@ flowchart TD
 - Coordinates the complete order lifecycle state machine.
 - Routes submissions through risk checks $\rightarrow$ order book matching $\rightarrow$ position updates $\rightarrow$ event broadcasting.
 
-### 6. Python API (`src/python/` & `trading_engine`)
+### 6. Correlated Multi-Asset Market Simulator (`src/market_sim.rs`)
+- **Correlated Geometric Brownian Motion (GBM)**: Simulates $N$ correlated price trajectories using Cholesky decomposition ($\mathbf{\Sigma} = \mathbf{L} \mathbf{L}^T$) and Box-Muller Gaussian transforms.
+- **Market Microstructure**:
+  - *Automated Market Makers*: Multi-level quoting ladders dynamically adjusted around prevailing theoretical fair prices.
+  - *Noise / Flow Traders*: Poisson arrival process simulating aggressive liquidity-taking market order flow.
+- Seamlessly accessible from Python via `MultiAssetMarketSim` and `AssetConfig`.
+
+### 7. Python API (`src/python/` & `trading_engine`)
 - Native Python C-extension built with PyO3.
 - Idiomatic Python classes: `Engine`, `Order`, `Trade`, `Position`, `Account`, `MarketDepth`, `RiskConfig`.
 - Fully typed with PEP 561 marker and clean docstrings.
@@ -147,6 +154,35 @@ print(f"Position: {pos.quantity} BTC @ avg ${pos.avg_entry_price:,.2f}")
 
 # Poll real-time events
 events = engine.poll_events()
+```
+
+---
+
+## Correlated Multi-Asset Simulation Example
+
+```python
+from trading_engine import AssetConfig, Engine, MultiAssetMarketSim
+
+engine = Engine(initial_balance=500_000.0)
+
+# Configure correlated asset universe
+btc = AssetConfig("BTC-USDT", initial_price=60_000.0, drift=0.03, volatility=0.45)
+eth = AssetConfig("ETH-USDT", initial_price=3_000.0, drift=0.03, volatility=0.55)
+
+# Correlation matrix
+correlation = [
+    [1.0, 0.85],
+    [0.85, 1.0],
+]
+
+# Initialize simulator
+sim = MultiAssetMarketSim(engine, [btc, eth], correlation, seed=42)
+
+# Step market 100 times (1 second intervals)
+for _ in range(100):
+    prices = sim.step(dt=1.0)
+    btc_depth = engine.get_depth("BTC-USDT")
+    eth_depth = engine.get_depth("ETH-USDT")
 ```
 
 ---

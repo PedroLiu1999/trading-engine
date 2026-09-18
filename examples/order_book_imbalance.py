@@ -1,14 +1,12 @@
-"""Order Book Imbalance (OBI) & Micro-Price Scalping Strategy
+"""Order Book Imbalance (OBI) Passive Queue Scalping Strategy
 
 Demonstrates:
 1. Multi-level Weighted Order Book Imbalance (WOBI) across L2 depth queues
-2. Stoikov Micro-Price calculation and deviation from mid-price
-3. High-frequency tick scalping with rapid inventory turnover
-4. Dynamic position sizing, take-profit, stop-loss, and queue-depletion exits
-5. Multi-account isolation tracking strategy alpha against internal simulator flow
+2. Passive queue joining with LIMIT orders (earning the spread instead of paying it)
+3. Bid/ask queue shielding: posting resting limit orders on the side supported by volume
+4. Opportunistic spread capture when noise traders cross our resting orders
+5. Performance attribution against simulator internal accounts (SIM_MM, SIM_NOISE)
 """
-
-from collections import deque
 
 from trading_engine import (
     AssetConfig,
@@ -58,7 +56,6 @@ def compute_order_book_metrics(depth: MarketDepth, max_levels: int = 4) -> dict[
     )
 
     # 3. Stoikov Micro-Price
-    # P_micro = (V_bid * P_ask + V_ask * P_bid) / (V_bid + V_ask)
     micro_price = (
         (top_bid_qty * best_ask + top_ask_qty * best_bid) / top_vol_sum
         if top_vol_sum > 0
@@ -80,7 +77,7 @@ def compute_order_book_metrics(depth: MarketDepth, max_levels: int = 4) -> dict[
 
 def run_obi_strategy():
     print("=" * 75)
-    print("Order Book Imbalance (OBI) & Micro-Price Scalping Strategy")
+    print("Order Book Imbalance (OBI) - Passive Queue Scalping Strategy")
     print("=" * 75)
 
     STRATEGY_ACCOUNT = "OBI_SCALPER"
@@ -99,7 +96,6 @@ def run_obi_strategy():
     engine = Engine(initial_balance=250_000.0, leverage=2.0, risk_config=risk)
 
     # 2. Configure Liquid Market with Active Noise Flow
-    # Realistic tight spread allows OBI scalpers to capture price jumps
     eth = AssetConfig(
         symbol="ETH-USDT",
         initial_price=3_000.0,
@@ -108,8 +104,8 @@ def run_obi_strategy():
         tick_size=0.10,
         lot_size=0.01,
         quote_levels=5,
-        base_spread_bps=0.8,  # ~ $0.24 tight spread
-        arrival_rate=30.0,  # Active noise order flow hitting book
+        base_spread_bps=1.0,  # ~ $0.30 spread
+        arrival_rate=25.0,  # Active noise flow crossing book
         avg_order_qty=4.0,
     )
 
@@ -126,28 +122,24 @@ def run_obi_strategy():
     )
 
     # 3. Strategy Configuration Parameters
-    WOBI_ENTRY_THRESH = 0.22  # Strong directional volume imbalance
-    WOBI_EXIT_THRESH = 0.04  # Imbalance normalized
-    MAX_HOLD_STEPS = 12  # Holding window for momentum follow-through
-    ORDER_QTY = 3.0  # 3.0 ETH per trade (~ $9,000 notional)
-    TAKE_PROFIT_PTS = 0.80  # Take profit (+8 ticks)
-    STOP_LOSS_PTS = 1.00  # Stop loss (-10 ticks)
+    WOBI_ENTRY_THRESH = 0.15  # Enter queue when volume imbalance exceeds 15%
+    ORDER_QTY = 3.0  # 3.0 ETH per quote
+    MAX_HOLD_STEPS = 10  # Maximum steps before emergency flatten
+    STOP_LOSS_PTS = 1.00  # Stop loss in dollars
 
     # Strategy State Tracking
-    in_position = False
-    pos_side = None  # "LONG" or "SHORT"
+    resting_order_id = None
     entry_step = 0
     trades_executed = 0
-    profitable_trades = 0
-    recent_wobi = deque(maxlen=5)
+    prev_qty = 0.0
 
-    print("\n--- Running High-Frequency Order Book Imbalance Scalper ---")
+    print("\n--- Running Passive Order Book Imbalance Scalper ---")
     print(
         f"Signal Parameters: Entry WOBI >= ±{WOBI_ENTRY_THRESH:.2f} | "
-        f"Exit WOBI <= ±{WOBI_EXIT_THRESH:.2f} | Max Hold = {MAX_HOLD_STEPS} steps\n"
+        f"Passive Limit Quoting | Max Hold = {MAX_HOLD_STEPS} steps\n"
     )
 
-    TOTAL_SIM_STEPS = 180
+    TOTAL_SIM_STEPS = 200
     for step in range(1, TOTAL_SIM_STEPS + 1):
         # Advance simulation by 500ms
         sim.step(dt=0.5)
@@ -156,108 +148,132 @@ def run_obi_strategy():
         metrics = compute_order_book_metrics(depth, max_levels=4)
         wobi = metrics["wobi"]
         mid = metrics["mid_price"]
-        recent_wobi.append(wobi)
 
-        action = "HOLD"
-
-        # Check Position Status
         pos = engine.get_position("ETH-USDT", account_id=STRATEGY_ACCOUNT)
         curr_qty = pos.quantity if pos else 0.0
         avg_entry = pos.avg_entry_price if pos else 0.0
 
-        if not in_position:
-            # Entry Logic: High buying pressure vs selling pressure
+        action = "HOLD"
+
+        # Detect new position fill from previous resting order
+        if abs(curr_qty) > 0.0 and abs(prev_qty) < 0.01:
+            trades_executed += 1
+            entry_step = step
+            resting_order_id = None
+
+        # Case 1: We are flat (no inventory)
+        if abs(curr_qty) < 0.01:
+            # Cancel old resting entry quote if price/signal changed
+            if resting_order_id is not None:
+                try:
+                    engine.cancel_order("ETH-USDT", resting_order_id)
+                except Exception:
+                    pass
+                resting_order_id = None
+
+            # Look for WOBI imbalances to join the queue passively
             if wobi >= WOBI_ENTRY_THRESH:
-                # Heavy bid support -> Go LONG
+                # Strong bid queue -> place LIMIT BUY at Best Bid
+                # Noise sellers will hit us, giving us a favorable entry at the bid!
                 order = engine.submit_order(
                     symbol="ETH-USDT",
                     side="BUY",
-                    order_type="MARKET",
-                    price=0.0,
+                    order_type="LIMIT",
+                    price=metrics["best_bid"],
                     quantity=ORDER_QTY,
-                    time_in_force="IOC",
+                    time_in_force="GTC",
                     account_id=STRATEGY_ACCOUNT,
                 )
-                if order.filled_quantity > 0:
-                    in_position = True
-                    pos_side = "LONG"
-                    entry_step = step
-                    trades_executed += 1
-                    action = (
-                        f"BUY {ORDER_QTY:.1f} ETH "
-                        f"(WOBI: {wobi:+.2f}, Dev: {metrics['micro_dev_bps']:+.1f}bps)"
-                    )
+                resting_order_id = order.id
+                action = (
+                    f"JOIN BID QUEUE: Limit Buy {ORDER_QTY:.1f} @ ${metrics['best_bid']:.2f} "
+                    f"(WOBI: {wobi:+.2f})"
+                )
 
             elif wobi <= -WOBI_ENTRY_THRESH:
-                # Heavy ask pressure -> Go SHORT
+                # Strong ask queue -> place LIMIT SELL at Best Ask
                 order = engine.submit_order(
                     symbol="ETH-USDT",
                     side="SELL",
-                    order_type="MARKET",
-                    price=0.0,
+                    order_type="LIMIT",
+                    price=metrics["best_ask"],
                     quantity=ORDER_QTY,
-                    time_in_force="IOC",
+                    time_in_force="GTC",
                     account_id=STRATEGY_ACCOUNT,
                 )
-                if order.filled_quantity > 0:
-                    in_position = True
-                    pos_side = "SHORT"
-                    entry_step = step
-                    trades_executed += 1
-                    action = (
-                        f"SELL {ORDER_QTY:.1f} ETH "
-                        f"(WOBI: {wobi:+.2f}, Dev: {metrics['micro_dev_bps']:+.1f}bps)"
-                    )
+                resting_order_id = order.id
+                action = (
+                    f"JOIN ASK QUEUE: Limit Sell {ORDER_QTY:.1f} @ ${metrics['best_ask']:.2f} "
+                    f"(WOBI: {wobi:+.2f})"
+                )
 
+        # Case 2: We hold inventory -> Quote exit passively on the opposite side to earn the spread!
         else:
-            # Exit Logic for Open Scalp based on true liquidation price
             hold_duration = step - entry_step
-            if pos_side == "LONG":
-                pnl_pts = metrics["best_bid"] - avg_entry
-            else:
-                pnl_pts = avg_entry - metrics["best_ask"]
+            pnl_pts = (
+                (metrics["best_bid"] - avg_entry)
+                if curr_qty > 0
+                else (avg_entry - metrics["best_ask"])
+            )
 
-            should_close = False
-            close_reason = ""
+            # Check Stop-Loss or Timeout
+            should_emergency_exit = (pnl_pts <= -STOP_LOSS_PTS) or (hold_duration >= MAX_HOLD_STEPS)
 
-            # Condition A: Take-Profit reached
-            if pnl_pts >= TAKE_PROFIT_PTS:
-                should_close = True
-                close_reason = f"TP HIT (+${pnl_pts:.2f})"
-            # Condition B: Stop-Loss reached
-            elif pnl_pts <= -STOP_LOSS_PTS:
-                should_close = True
-                close_reason = f"SL HIT (-${abs(pnl_pts):.2f})"
-            # Condition C: Imbalance dissipates / normalizes
-            elif (pos_side == "LONG" and wobi <= WOBI_EXIT_THRESH) or (
-                pos_side == "SHORT" and wobi >= -WOBI_EXIT_THRESH
-            ):
-                should_close = True
-                close_reason = f"WOBI NORMALIZED ({wobi:+.2f})"
-            # Condition D: Max holding period elapsed
-            elif hold_duration >= MAX_HOLD_STEPS:
-                should_close = True
-                close_reason = f"TIMEOUT ({hold_duration} steps)"
+            if should_emergency_exit:
+                # Cancel resting quote and flatten with IOC
+                if resting_order_id is not None:
+                    try:
+                        engine.cancel_order("ETH-USDT", resting_order_id)
+                    except Exception:
+                        pass
+                    resting_order_id = None
 
-            if should_close and abs(curr_qty) > 0:
-                close_side = "SELL" if pos_side == "LONG" else "BUY"
+                exit_side = "SELL" if curr_qty > 0 else "BUY"
                 engine.submit_order(
                     symbol="ETH-USDT",
-                    side=close_side,
+                    side=exit_side,
                     order_type="MARKET",
                     price=0.0,
                     quantity=abs(curr_qty),
                     time_in_force="IOC",
                     account_id=STRATEGY_ACCOUNT,
                 )
-                if pnl_pts > 0:
-                    profitable_trades += 1
-                pnl_dollars = pnl_pts * ORDER_QTY
-                action = (
-                    f"CLOSE {pos_side} @ ${mid:.2f} [{close_reason}] (Pnl: ${pnl_dollars:>+6.2f})"
+                pnl_dollars = pnl_pts * abs(curr_qty)
+                action = f"EMERGENCY FLATTEN ({curr_qty:+.1f} ETH) [Pnl: ${pnl_dollars:>+6.2f}]"
+            else:
+                # Quote passively on the exit side to capture the spread!
+                if curr_qty > 0:
+                    # Long inventory -> quote Limit Sell at Best Ask
+                    exit_price = metrics["best_ask"]
+                    exit_side = "SELL"
+                else:
+                    # Short inventory -> quote Limit Buy at Best Bid
+                    exit_price = metrics["best_bid"]
+                    exit_side = "BUY"
+
+                # Update resting exit quote
+                if resting_order_id is not None:
+                    try:
+                        engine.cancel_order("ETH-USDT", resting_order_id)
+                    except Exception:
+                        pass
+                order = engine.submit_order(
+                    symbol="ETH-USDT",
+                    side=exit_side,
+                    order_type="LIMIT",
+                    price=exit_price,
+                    quantity=abs(curr_qty),
+                    time_in_force="GTC",
+                    account_id=STRATEGY_ACCOUNT,
                 )
-                in_position = False
-                pos_side = None
+                resting_order_id = order.id
+                target_pnl = (exit_price - avg_entry) if curr_qty > 0 else (avg_entry - exit_price)
+                action = (
+                    f"PASSIVE EXIT QUOTE: {exit_side} {abs(curr_qty):.1f} @ ${exit_price:.2f} "
+                    f"(Target Spread: ${target_pnl:>+5.2f})"
+                )
+
+        prev_qty = curr_qty
 
         if step % 2 == 0 or action != "HOLD":
             dev_bps = metrics["micro_dev_bps"]
@@ -266,7 +282,13 @@ def run_obi_strategy():
                 f"Dev: {dev_bps:>+5.1f}bps | Pos: {curr_qty:>+4.1f} -> {action}"
             )
 
-    # 4. Final Position Clean-Up (Ensure 0 residual overnight inventory)
+    # 4. Final Position Clean-Up
+    if resting_order_id is not None:
+        try:
+            engine.cancel_order("ETH-USDT", resting_order_id)
+        except Exception:
+            pass
+
     final_pos = engine.get_position("ETH-USDT", account_id=STRATEGY_ACCOUNT)
     if final_pos and abs(final_pos.quantity) >= 0.01:
         close_side = "SELL" if final_pos.quantity > 0 else "BUY"
@@ -284,13 +306,11 @@ def run_obi_strategy():
     strat_acct = engine.get_account(STRATEGY_ACCOUNT)
     realized_pnl = strat_acct.realized_pnl if strat_acct else 0.0
     cash_balance = strat_acct.cash_balance if strat_acct else 250_000.0
-    win_rate = (profitable_trades / trades_executed * 100.0) if trades_executed > 0 else 0.0
 
     print("\n" + "=" * 75)
-    print("Order Book Imbalance Strategy Performance Summary (Isolated):")
+    print("Passive Order Book Imbalance Strategy Performance Summary (Isolated):")
     print(f"  Account ID              : {STRATEGY_ACCOUNT}")
-    print(f"  Total Trades Executed   : {trades_executed}")
-    print(f"  Win Rate                : {win_rate:.1f}% ({profitable_trades}/{trades_executed})")
+    print(f"  Inventory Entries       : {trades_executed}")
     print(f"  Realized PnL            : ${realized_pnl:>+10.2f}")
     print(f"  Final Cash Balance      : ${cash_balance:,.2f}")
 

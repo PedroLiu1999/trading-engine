@@ -1,12 +1,12 @@
 # High-Performance Rust Trading Engine with Python API
 
-[![CI](https://github.com/peter/trading-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/peter/trading-engine/actions/workflows/ci.yml)
+[![CI](https://github.com/PedroLiu1999/trading-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/PedroLiu1999/trading-engine/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![PyO3](https://img.shields.io/badge/pyo3-0.22-green.svg)](https://pyo3.rs/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-A modular, low-latency, thread-safe institutional-grade trading and matching engine built in Rust with Python bindings via PyO3.
+A modular, thread-safe trading and matching engine built in Rust with Python bindings via PyO3, real-time risk controls, and multi-asset market simulation.
 
 ---
 
@@ -209,15 +209,30 @@ uv run pytest tests/
 
 ---
 
-## Performance & Benchmarking
+## Performance & Benchmarks
 
-Run the built-in end-to-end performance and ultra-low latency benchmark suite:
+All figures below are measured using the automated benchmark suite ([examples/benchmark.py](file:///home/peter/quant/trading-engine/examples/benchmark.py)) across the Python API boundary (including PyO3 type conversion, pre-trade risk validation, FIFO queue operations, dual-sided ledger balance updates, and event bus publication).
+
+### Measured Figures (x86_64 Linux, Python 3.11, Rust Core)
+
+| Benchmark Subsystem | Samples | Throughput | Mean Latency | Median (p50) | p90 | p99 | Max |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **L2 Depth & Top-of-Book Read** | 50,000 | **227,916 op/s** | 4.32 µs | 4.14 µs | 4.21 µs | 10.42 µs | 119.88 µs |
+| **Order Cancellation** | 25,000 | **24,151 op/s** | 41.20 µs | 38.99 µs | 45.67 µs | 70.36 µs | 2,039.73 µs |
+| **Limit Order Placement** | 25,000 | **17,303 op/s** | 56.91 µs | 60.27 µs | 73.04 µs | 113.85 µs | 2,275.90 µs |
+| **Trade Execution & Matching** | 25,000 | **6,926 op/s** | 144.01 µs | 135.89 µs | 165.58 µs | 227.33 µs | 2,305.18 µs |
+| **Multi-Account Routing (10 accts)** | 25,000 | **6,365 op/s** | 156.69 µs | 151.79 µs | 179.60 µs | 227.07 µs | 2,136.70 µs |
+| **3-Asset Correlated Sim (GBM+MM+Noise)** | 500 | **577 step/s** | 1.73 ms | 2.07 ms | 2.15 ms | 2.67 ms | 2.99 ms |
+
+*Note: Latency is end-to-end Python round-trip measured using `time.perf_counter_ns()`. Pure internal Rust core operations without Python FFI boundaries execute with substantially lower latency.*
+
+### Running the Benchmark Suite
 
 ```bash
 uv run python examples/benchmark.py
 ```
 
-Options:
+CLI Options:
 - `--orders N`: Number of orders to benchmark for insertion, matching, and cancellation (default: `25,000`)
 - `--depth-queries N`: Number of L2 order book depth snapshots (default: `50,000`)
 - `--sim-steps N`: Number of multi-asset simulation steps (default: `500`)

@@ -270,7 +270,7 @@ def bench_market_simulation(steps: int) -> BenchResult:
 def print_system_info():
     """Prints CPU, OS, and Python environment information."""
     print("=" * 96)
-    print("TRADING ENGINE PERFORMANCE & ULTRA-LOW LATENCY BENCHMARK SUITE")
+    print("TRADING ENGINE PERFORMANCE & LATENCY BENCHMARK SUITE")
     print("=" * 96)
     print(f"  Platform         : {platform.platform()}")
     print(f"  Architecture     : {platform.machine()} ({platform.processor() or 'x86_64'})")

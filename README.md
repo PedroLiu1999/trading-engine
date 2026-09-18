@@ -109,6 +109,7 @@ flowchart TD
    ```bash
    uv run python examples/basic_trading.py
    uv run python examples/market_maker.py
+   uv run python examples/multi_asset_stat_arb.py
    ```
 
 3. **Run Native Rust Standalone CLI Demo:**

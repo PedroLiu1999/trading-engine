@@ -133,7 +133,9 @@ impl RiskManager {
             }
         }
 
-        if self.order_timestamps.len() >= self.config.max_orders_per_sec {
+        if self.config.max_orders_per_sec > 0
+            && self.order_timestamps.len() >= self.config.max_orders_per_sec
+        {
             return Err(RiskRejection::RateLimitExceeded(
                 self.order_timestamps.len(),
             ));

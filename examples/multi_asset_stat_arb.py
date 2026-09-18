@@ -11,8 +11,9 @@ Demonstrates:
 4. Tracking isolated multi-account positions, cash balance, and PnL
 """
 
-from collections import deque
 import math
+from collections import deque
+
 from trading_engine import AssetConfig, Engine, MultiAssetMarketSim, RiskConfig
 
 
@@ -51,7 +52,7 @@ def run_stat_arb_simulation():
     engine = Engine(initial_balance=500_000.0, leverage=2.0, risk_config=risk)
 
     # 2. Configure 3 Correlated Assets
-    # With higher noise flow, order book dislocations occur, creating statistical arbitrage opportunities
+    # Microstructure flow causes transient order book dislocations
     btc = AssetConfig(
         symbol="BTC-USDT",
         initial_price=60_000.0,
@@ -60,7 +61,7 @@ def run_stat_arb_simulation():
         tick_size=0.50,
         lot_size=0.001,
         quote_levels=3,
-        base_spread_bps=1.0,     # Realistic tier-1 exchange spread (0.01%)
+        base_spread_bps=1.0,  # Realistic tier-1 exchange spread (0.01%)
         arrival_rate=15.0,
         avg_order_qty=0.5,
     )
@@ -73,7 +74,7 @@ def run_stat_arb_simulation():
         tick_size=0.10,
         lot_size=0.01,
         quote_levels=3,
-        base_spread_bps=1.2,     # Realistic tier-1 exchange spread (0.012%)
+        base_spread_bps=1.2,  # Realistic tier-1 exchange spread (0.012%)
         arrival_rate=20.0,
         avg_order_qty=5.0,
     )
@@ -116,10 +117,10 @@ def run_stat_arb_simulation():
     # 4. Statistical Arbitrage Parameters
     # Calibrated for high-frequency pairs trading with realistic tier-1 spreads:
     WINDOW_SIZE = 25
-    Z_ENTRY = 1.20           # Enter when ratio diverges by >= 1.20 std devs
-    Z_EXIT = 0.20            # Exit when ratio reverts to within 0.20 std devs of mean
-    Z_STOP = 3.50            # Stop loss if correlation breaks down
-    MIN_DEV_PCT = 0.012      # Minimum deviation % required to trigger entry (1.2 bps)
+    Z_ENTRY = 1.20  # Enter when ratio diverges by >= 1.20 std devs
+    Z_EXIT = 0.20  # Exit when ratio reverts to within 0.20 std devs of mean
+    Z_STOP = 3.50  # Stop loss if correlation breaks down
+    MIN_DEV_PCT = 0.012  # Minimum deviation % required to trigger entry (1.2 bps)
     TARGET_NOTIONAL = 30_000.0  # $30,000 per leg for dollar-neutral exposure
 
     ratio_window = deque(maxlen=WINDOW_SIZE)
@@ -127,7 +128,10 @@ def run_stat_arb_simulation():
     trade_side = None  # "LONG_ETH" or "SHORT_ETH"
 
     print("\n--- Running Statistical Arbitrage Strategy (ETH / BTC Pairs Trading) ---")
-    print(f"Strategy: Rolling Z-Score (Window={WINDOW_SIZE}), Z_Entry={Z_ENTRY}, MinDev={MIN_DEV_PCT}%\n")
+    print(
+        f"Strategy: Rolling Z-Score (Window={WINDOW_SIZE}), "
+        f"Z_Entry={Z_ENTRY}, MinDev={MIN_DEV_PCT}%\n"
+    )
 
     TOTAL_STEPS = 800
     for step in range(1, TOTAL_STEPS + 1):
@@ -145,7 +149,9 @@ def run_stat_arb_simulation():
 
         # Skip trading during initial rolling window warm-up
         if len(ratio_window) < WINDOW_SIZE:
-            print(f"[Step {step:02d}] Warming up rolling ratio window ({len(ratio_window)}/{WINDOW_SIZE})...")
+            print(
+                f"[Step {step:02d}] Warming up ratio window ({len(ratio_window)}/{WINDOW_SIZE})..."
+            )
             continue
 
         mean_ratio = sum(ratio_window) / len(ratio_window)

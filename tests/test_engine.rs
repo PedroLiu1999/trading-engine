@@ -261,7 +261,15 @@ fn test_execution_engine_integrated_flow() {
 
     // Take liquidity with default trader account
     let buy = engine
-        .submit_order(Some("taker_1".to_string()), "BTC-USD", Side::Buy, OrderType::Market, 0.0, 1.0, TimeInForce::IOC)
+        .submit_order(
+            Some("taker_1".to_string()),
+            "BTC-USD",
+            Side::Buy,
+            OrderType::Market,
+            0.0,
+            1.0,
+            TimeInForce::IOC,
+        )
         .unwrap();
 
     assert_eq!(buy.status, OrderStatus::Filled);
@@ -276,8 +284,16 @@ fn test_execution_engine_integrated_flow() {
     while let Ok(e) = rx.try_recv() {
         events.push(e);
     }
-    assert!(events.iter().any(|e| matches!(e, EngineEvent::OrderSubmitted(_))));
-    assert!(events.iter().any(|e| matches!(e, EngineEvent::OrderAccepted(_))));
-    assert!(events.iter().any(|e| matches!(e, EngineEvent::TradeExecuted(_))));
-    assert!(events.iter().any(|e| matches!(e, EngineEvent::PositionUpdated { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, EngineEvent::OrderSubmitted(_))));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, EngineEvent::OrderAccepted(_))));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, EngineEvent::TradeExecuted(_))));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, EngineEvent::PositionUpdated { .. })));
 }

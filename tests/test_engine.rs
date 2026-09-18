@@ -8,16 +8,44 @@ fn test_order_book_bids_and_asks_depth() {
     let mut book = OrderBook::new("AAPL", 0.01, 1.0);
 
     let o1 = trading_engine::Order::new(
-        1, None, "AAPL", Side::Buy, OrderType::Limit, 150.0, 10.0, TimeInForce::GTC,
+        1,
+        None,
+        "AAPL",
+        Side::Buy,
+        OrderType::Limit,
+        150.0,
+        10.0,
+        TimeInForce::GTC,
     );
     let o2 = trading_engine::Order::new(
-        2, None, "AAPL", Side::Buy, OrderType::Limit, 149.5, 20.0, TimeInForce::GTC,
+        2,
+        None,
+        "AAPL",
+        Side::Buy,
+        OrderType::Limit,
+        149.5,
+        20.0,
+        TimeInForce::GTC,
     );
     let o3 = trading_engine::Order::new(
-        3, None, "AAPL", Side::Sell, OrderType::Limit, 151.0, 15.0, TimeInForce::GTC,
+        3,
+        None,
+        "AAPL",
+        Side::Sell,
+        OrderType::Limit,
+        151.0,
+        15.0,
+        TimeInForce::GTC,
     );
     let o4 = trading_engine::Order::new(
-        4, None, "AAPL", Side::Sell, OrderType::Limit, 151.5, 25.0, TimeInForce::GTC,
+        4,
+        None,
+        "AAPL",
+        Side::Sell,
+        OrderType::Limit,
+        151.5,
+        25.0,
+        TimeInForce::GTC,
     );
 
     book.process_order(o1);
@@ -45,15 +73,36 @@ fn test_order_matching_crossing_spread() {
 
     // Resting asks: 1.0 @ 3000, 2.0 @ 3010
     book.process_order(trading_engine::Order::new(
-        1, None, "ETH-USDT", Side::Sell, OrderType::Limit, 3000.0, 1.0, TimeInForce::GTC,
+        1,
+        None,
+        "ETH-USDT",
+        Side::Sell,
+        OrderType::Limit,
+        3000.0,
+        1.0,
+        TimeInForce::GTC,
     ));
     book.process_order(trading_engine::Order::new(
-        2, None, "ETH-USDT", Side::Sell, OrderType::Limit, 3010.0, 2.0, TimeInForce::GTC,
+        2,
+        None,
+        "ETH-USDT",
+        Side::Sell,
+        OrderType::Limit,
+        3010.0,
+        2.0,
+        TimeInForce::GTC,
     ));
 
     // Incoming buy limit crossing spread: Buy 2.5 @ 3010.0
     let res = book.process_order(trading_engine::Order::new(
-        3, None, "ETH-USDT", Side::Buy, OrderType::Limit, 3010.0, 2.5, TimeInForce::GTC,
+        3,
+        None,
+        "ETH-USDT",
+        Side::Buy,
+        OrderType::Limit,
+        3010.0,
+        2.5,
+        TimeInForce::GTC,
     ));
 
     assert_eq!(res.trades.len(), 2);
@@ -74,15 +123,36 @@ fn test_market_order_walks_book() {
     let mut book = OrderBook::new("BTC-USD", 1.0, 0.01);
 
     book.process_order(trading_engine::Order::new(
-        1, None, "BTC-USD", Side::Sell, OrderType::Limit, 60000.0, 0.5, TimeInForce::GTC,
+        1,
+        None,
+        "BTC-USD",
+        Side::Sell,
+        OrderType::Limit,
+        60000.0,
+        0.5,
+        TimeInForce::GTC,
     ));
     book.process_order(trading_engine::Order::new(
-        2, None, "BTC-USD", Side::Sell, OrderType::Limit, 60100.0, 1.0, TimeInForce::GTC,
+        2,
+        None,
+        "BTC-USD",
+        Side::Sell,
+        OrderType::Limit,
+        60100.0,
+        1.0,
+        TimeInForce::GTC,
     ));
 
     // Market Buy 1.0
     let res = book.process_order(trading_engine::Order::new(
-        3, None, "BTC-USD", Side::Buy, OrderType::Market, 0.0, 1.0, TimeInForce::IOC,
+        3,
+        None,
+        "BTC-USD",
+        Side::Buy,
+        OrderType::Market,
+        0.0,
+        1.0,
+        TimeInForce::IOC,
     ));
 
     assert_eq!(res.trades.len(), 2);
@@ -98,7 +168,14 @@ fn test_order_cancellation() {
     let mut book = OrderBook::new("AAPL", 0.01, 1.0);
 
     book.process_order(trading_engine::Order::new(
-        1, None, "AAPL", Side::Buy, OrderType::Limit, 150.0, 10.0, TimeInForce::GTC,
+        1,
+        None,
+        "AAPL",
+        Side::Buy,
+        OrderType::Limit,
+        150.0,
+        10.0,
+        TimeInForce::GTC,
     ));
     assert_eq!(book.total_orders(), 1);
 
@@ -181,7 +258,8 @@ fn test_position_pnl_scale_in_and_close() {
 
     // Total account equity
     assert_eq!(
-        pm.default_account().equity(pm.total_unrealized_pnl("DEFAULT")),
+        pm.default_account()
+            .equity(pm.total_unrealized_pnl("DEFAULT")),
         100_000.0 + 200.0 + 300.0
     );
 }
@@ -203,21 +281,45 @@ fn test_risk_manager_validations() {
 
     // 1. Order qty too large
     let o1 = trading_engine::Order::new(
-        1, None, "BTC", Side::Buy, OrderType::Limit, 30000.0, 15.0, TimeInForce::GTC,
+        1,
+        None,
+        "BTC",
+        Side::Buy,
+        OrderType::Limit,
+        30000.0,
+        15.0,
+        TimeInForce::GTC,
     );
     let res = rm.check_order(&o1, &account, None, Some(30000.0), 0.0);
     assert!(matches!(res, Err(RiskRejection::OrderQtyTooLarge { .. })));
 
     // 2. Price collar breach (>5% away from mid)
     let o2 = trading_engine::Order::new(
-        2, None, "BTC", Side::Buy, OrderType::Limit, 35000.0, 1.0, TimeInForce::GTC,
+        2,
+        None,
+        "BTC",
+        Side::Buy,
+        OrderType::Limit,
+        35000.0,
+        1.0,
+        TimeInForce::GTC,
     );
     let res = rm.check_order(&o2, &account, None, Some(30000.0), 0.0);
-    assert!(matches!(res, Err(RiskRejection::PriceCollarBreached { .. })));
+    assert!(matches!(
+        res,
+        Err(RiskRejection::PriceCollarBreached { .. })
+    ));
 
     // 3. Valid order
     let o3 = trading_engine::Order::new(
-        3, None, "BTC", Side::Buy, OrderType::Limit, 30500.0, 1.0, TimeInForce::GTC,
+        3,
+        None,
+        "BTC",
+        Side::Buy,
+        OrderType::Limit,
+        30500.0,
+        1.0,
+        TimeInForce::GTC,
     );
     let res = rm.check_order(&o3, &account, None, Some(30000.0), 0.0);
     assert!(res.is_ok());

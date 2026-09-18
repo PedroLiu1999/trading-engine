@@ -1,8 +1,6 @@
 use crate::event_bus::EngineEvent;
 use crate::execution_engine::ExecutionEngine;
-use crate::python::types::{
-    PyAccount, PyMarketDepth, PyOrder, PyPosition, PyRiskConfig,
-};
+use crate::python::types::{PyAccount, PyMarketDepth, PyOrder, PyPosition, PyRiskConfig};
 use crate::risk_manager::RiskConfig;
 use crate::types::{OrderType, Side, TimeInForce};
 use crossbeam_channel::Receiver;

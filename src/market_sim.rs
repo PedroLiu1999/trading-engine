@@ -9,14 +9,14 @@ use std::sync::Arc;
 pub struct AssetConfig {
     pub symbol: String,
     pub initial_price: f64,
-    pub drift: f64,              // Annualized drift (e.g. 0.05 for 5%)
-    pub volatility: f64,         // Annualized volatility (e.g. 0.30 for 30%)
-    pub tick_size: f64,          // Minimum price increment
-    pub lot_size: f64,           // Minimum order quantity
-    pub quote_levels: usize,     // Depth levels quoted by market maker (e.g. 3)
-    pub base_spread_bps: f64,    // Half-spread in basis points (e.g. 5.0 for 0.05%)
-    pub arrival_rate: f64,       // Poisson market order arrival rate (orders per second)
-    pub avg_order_qty: f64,      // Average quantity for noise market orders
+    pub drift: f64,           // Annualized drift (e.g. 0.05 for 5%)
+    pub volatility: f64,      // Annualized volatility (e.g. 0.30 for 30%)
+    pub tick_size: f64,       // Minimum price increment
+    pub lot_size: f64,        // Minimum order quantity
+    pub quote_levels: usize,  // Depth levels quoted by market maker (e.g. 3)
+    pub base_spread_bps: f64, // Half-spread in basis points (e.g. 5.0 for 0.05%)
+    pub arrival_rate: f64,    // Poisson market order arrival rate (orders per second)
+    pub avg_order_qty: f64,   // Average quantity for noise market orders
 }
 
 impl AssetConfig {
@@ -203,7 +203,8 @@ impl MultiAssetMarketSim {
             self.current_prices[i] = (new_price / asset.tick_size).round() * asset.tick_size;
 
             // Update mark-to-market in engine
-            self.engine.mark_to_market(&asset.symbol, self.current_prices[i]);
+            self.engine
+                .mark_to_market(&asset.symbol, self.current_prices[i]);
         }
 
         // 4. Cancel previous resting market maker quotes
@@ -229,7 +230,8 @@ impl MultiAssetMarketSim {
                 let bid_price = (raw_bid / asset.tick_size).round() * asset.tick_size;
                 let ask_price = (raw_ask / asset.tick_size).round() * asset.tick_size;
 
-                let qty = (asset.avg_order_qty * (1.0 + 0.5 * (level as f64)) / asset.lot_size).round()
+                let qty = (asset.avg_order_qty * (1.0 + 0.5 * (level as f64)) / asset.lot_size)
+                    .round()
                     * asset.lot_size;
 
                 if let Ok(bid) = self.engine.submit_order_with_account(
@@ -271,7 +273,8 @@ impl MultiAssetMarketSim {
             if self.rng.next_f64() < p_arrival {
                 let is_buy = self.rng.next_f64() < 0.5;
                 let size_factor = 0.5 + self.rng.next_f64(); // 0.5x to 1.5x avg qty
-                let qty = ((asset.avg_order_qty * size_factor) / asset.lot_size).round() * asset.lot_size;
+                let qty =
+                    ((asset.avg_order_qty * size_factor) / asset.lot_size).round() * asset.lot_size;
 
                 if qty > 0.0 {
                     let side = if is_buy { Side::Buy } else { Side::Sell };

@@ -1,6 +1,4 @@
-use trading_engine::{
-    ExecutionEngine, OrderType, RiskConfig, Side, TimeInForce,
-};
+use trading_engine::{ExecutionEngine, OrderType, RiskConfig, Side, TimeInForce};
 
 fn main() {
     println!("=== High-Performance Rust Trading Engine Demo ===");
@@ -26,33 +24,87 @@ fn main() {
     println!("\n--- Step 1: Seeding resting limit orders ---");
     // Seed Bids
     engine
-        .submit_order(None, symbol, Side::Buy, OrderType::Limit, 50_000.0, 1.5, TimeInForce::GTC)
+        .submit_order(
+            None,
+            symbol,
+            Side::Buy,
+            OrderType::Limit,
+            50_000.0,
+            1.5,
+            TimeInForce::GTC,
+        )
         .unwrap();
     engine
-        .submit_order(None, symbol, Side::Buy, OrderType::Limit, 49_950.0, 2.0, TimeInForce::GTC)
+        .submit_order(
+            None,
+            symbol,
+            Side::Buy,
+            OrderType::Limit,
+            49_950.0,
+            2.0,
+            TimeInForce::GTC,
+        )
         .unwrap();
     engine
-        .submit_order(None, symbol, Side::Buy, OrderType::Limit, 49_900.0, 3.0, TimeInForce::GTC)
+        .submit_order(
+            None,
+            symbol,
+            Side::Buy,
+            OrderType::Limit,
+            49_900.0,
+            3.0,
+            TimeInForce::GTC,
+        )
         .unwrap();
 
     // Seed Asks
     engine
-        .submit_order(None, symbol, Side::Sell, OrderType::Limit, 50_050.0, 1.0, TimeInForce::GTC)
+        .submit_order(
+            None,
+            symbol,
+            Side::Sell,
+            OrderType::Limit,
+            50_050.0,
+            1.0,
+            TimeInForce::GTC,
+        )
         .unwrap();
     engine
-        .submit_order(None, symbol, Side::Sell, OrderType::Limit, 50_100.0, 2.5, TimeInForce::GTC)
+        .submit_order(
+            None,
+            symbol,
+            Side::Sell,
+            OrderType::Limit,
+            50_100.0,
+            2.5,
+            TimeInForce::GTC,
+        )
         .unwrap();
 
     let depth = engine.get_depth(symbol, 5).unwrap();
     println!("Market Depth for {}:", symbol);
-    println!("  Best Bid: {:?}, Best Ask: {:?}", depth.best_bid(), depth.best_ask());
-    println!("  Mid Price: {:?}, Spread: {:?}", depth.mid_price(), depth.spread());
+    println!(
+        "  Best Bid: {:?}, Best Ask: {:?}",
+        depth.best_bid(),
+        depth.best_ask()
+    );
+    println!(
+        "  Mid Price: {:?}, Spread: {:?}",
+        depth.mid_price(),
+        depth.spread()
+    );
     for ask in depth.asks.iter().rev() {
-        println!("  ASK: {:>8.2} | Qty: {:>6.3} ({} orders)", ask.price, ask.quantity, ask.order_count);
+        println!(
+            "  ASK: {:>8.2} | Qty: {:>6.3} ({} orders)",
+            ask.price, ask.quantity, ask.order_count
+        );
     }
     println!("  --------------------------------");
     for bid in &depth.bids {
-        println!("  BID: {:>8.2} | Qty: {:>6.3} ({} orders)", bid.price, bid.quantity, bid.order_count);
+        println!(
+            "  BID: {:>8.2} | Qty: {:>6.3} ({} orders)",
+            bid.price, bid.quantity, bid.order_count
+        );
     }
 
     println!("\n--- Step 2: Executing Market Buy (Crossing the spread) ---");

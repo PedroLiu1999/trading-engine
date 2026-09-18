@@ -132,9 +132,13 @@ impl ExecutionEngine {
             let current_pos = pos_mgr.get_position(&acct_id, symbol).cloned();
             let account = pos_mgr.get_or_create_account(&acct_id).clone();
 
-            if let Err(rejection) =
-                risk.check_order(&order, &account, current_pos.as_ref(), mid_price, unrealized_pnl)
-            {
+            if let Err(rejection) = risk.check_order(
+                &order,
+                &account,
+                current_pos.as_ref(),
+                mid_price,
+                unrealized_pnl,
+            ) {
                 order.status = OrderStatus::Rejected;
                 self.event_bus.publish(EngineEvent::RiskBreached {
                     rule: "PreTradeCheck".to_string(),

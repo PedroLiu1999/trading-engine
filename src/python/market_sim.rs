@@ -131,13 +131,8 @@ impl PyMultiAssetMarketSim {
         seed: u64,
     ) -> PyResult<Self> {
         let rust_assets: Vec<AssetConfig> = assets.into_iter().map(Into::into).collect();
-        let sim = MultiAssetMarketSim::new(
-            engine.inner(),
-            rust_assets,
-            correlation_matrix,
-            seed,
-        )
-        .map_err(|e| PyValueError::new_err(e))?;
+        let sim = MultiAssetMarketSim::new(engine.inner(), rust_assets, correlation_matrix, seed)
+            .map_err(|e| PyValueError::new_err(e))?;
 
         Ok(Self { sim })
     }

@@ -177,16 +177,10 @@ impl OrderBook {
 
                             match side {
                                 Side::Buy => {
-                                    self.bids
-                                        .entry(tick)
-                                        .or_default()
-                                        .push_back(order.clone());
+                                    self.bids.entry(tick).or_default().push_back(order.clone());
                                 }
                                 Side::Sell => {
-                                    self.asks
-                                        .entry(tick)
-                                        .or_default()
-                                        .push_back(order.clone());
+                                    self.asks.entry(tick).or_default().push_back(order.clone());
                                 }
                             }
                             self.order_map.insert(order_id, (side, tick));

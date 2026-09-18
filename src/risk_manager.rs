@@ -47,7 +47,9 @@ pub enum RiskRejection {
     #[error("Projected position notional {projected} exceeds max allowed {max}")]
     PositionNotionalTooLarge { projected: f64, max: f64 },
 
-    #[error("Limit price {price} deviates {diff_pct:.2}% from mid {mid}, exceeding collar {collar:.2}%")]
+    #[error(
+        "Limit price {price} deviates {diff_pct:.2}% from mid {mid}, exceeding collar {collar:.2}%"
+    )]
     PriceCollarBreached {
         price: f64,
         mid: f64,

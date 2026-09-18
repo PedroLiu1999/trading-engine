@@ -433,7 +433,11 @@ impl PyPosition {
     fn __repr__(&self) -> String {
         format!(
             "Position(symbol='{}', qty={}, avg_entry={}, realized_pnl={:.2}, unrealized_pnl={:.2})",
-            self.symbol, self.quantity, self.avg_entry_price, self.realized_pnl, self.unrealized_pnl
+            self.symbol,
+            self.quantity,
+            self.avg_entry_price,
+            self.realized_pnl,
+            self.unrealized_pnl
         )
     }
 }

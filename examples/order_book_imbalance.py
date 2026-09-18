@@ -139,7 +139,7 @@ def run_obi_strategy():
         f"Passive Limit Quoting | Max Hold = {MAX_HOLD_STEPS} steps\n"
     )
 
-    TOTAL_SIM_STEPS = 200
+    TOTAL_SIM_STEPS = 800
     for step in range(1, TOTAL_SIM_STEPS + 1):
         # Advance simulation by 500ms
         sim.step(dt=0.5)

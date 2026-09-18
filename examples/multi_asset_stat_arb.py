@@ -17,20 +17,24 @@ from collections import deque
 from trading_engine import AssetConfig, Engine, MultiAssetMarketSim, RiskConfig
 
 
-def flatten_positions(engine: Engine) -> None:
+def flatten_positions(engine: Engine, account_id: str = "STAT_ARB") -> None:
     """Closes all strategy positions flat with market orders."""
-    eth_pos = engine.get_position("ETH-USDT")
-    btc_pos = engine.get_position("BTC-USDT")
+    eth_pos = engine.get_position("ETH-USDT", account_id=account_id)
+    btc_pos = engine.get_position("BTC-USDT", account_id=account_id)
     eth_qty = eth_pos.quantity if eth_pos else 0.0
     btc_qty = btc_pos.quantity if btc_pos else 0.0
 
     if abs(eth_qty) >= 0.01:
         side = "SELL" if eth_qty > 0 else "BUY"
-        engine.submit_order("ETH-USDT", side, "MARKET", 0.0, round(abs(eth_qty), 2), "IOC")
+        engine.submit_order(
+            "ETH-USDT", side, "MARKET", 0.0, round(abs(eth_qty), 2), "IOC", account_id=account_id
+        )
 
     if abs(btc_qty) >= 0.001:
         side = "SELL" if btc_qty > 0 else "BUY"
-        engine.submit_order("BTC-USDT", side, "MARKET", 0.0, round(abs(btc_qty), 3), "IOC")
+        engine.submit_order(
+            "BTC-USDT", side, "MARKET", 0.0, round(abs(btc_qty), 3), "IOC", account_id=account_id
+        )
 
 
 def run_stat_arb_simulation():
@@ -122,6 +126,7 @@ def run_stat_arb_simulation():
     Z_STOP = 3.50  # Stop loss if correlation breaks down
     MIN_DEV_PCT = 0.012  # Minimum deviation % required to trigger entry (1.2 bps)
     TARGET_NOTIONAL = 30_000.0  # $30,000 per leg for dollar-neutral exposure
+    STRAT_ACCOUNT = "STAT_ARB"
 
     ratio_window = deque(maxlen=WINDOW_SIZE)
     in_trade = False
@@ -171,16 +176,24 @@ def run_stat_arb_simulation():
             if z_score <= -Z_ENTRY and abs(dev_pct) >= MIN_DEV_PCT:
                 # ETH is undervalued relative to BTC -> Long ETH / Short BTC
                 action = f"ENTER LONG ETH ({eth_qty:.2f}) / SHORT BTC ({btc_qty:.3f})"
-                engine.submit_order("ETH-USDT", "BUY", "MARKET", 0.0, eth_qty, "IOC")
-                engine.submit_order("BTC-USDT", "SELL", "MARKET", 0.0, btc_qty, "IOC")
+                engine.submit_order(
+                    "ETH-USDT", "BUY", "MARKET", 0.0, eth_qty, "IOC", account_id=STRAT_ACCOUNT
+                )
+                engine.submit_order(
+                    "BTC-USDT", "SELL", "MARKET", 0.0, btc_qty, "IOC", account_id=STRAT_ACCOUNT
+                )
                 in_trade = True
                 trade_side = "LONG_ETH"
 
             elif z_score >= Z_ENTRY and abs(dev_pct) >= MIN_DEV_PCT:
                 # ETH is overvalued relative to BTC -> Short ETH / Long BTC
                 action = f"ENTER SHORT ETH ({eth_qty:.2f}) / LONG BTC ({btc_qty:.3f})"
-                engine.submit_order("ETH-USDT", "SELL", "MARKET", 0.0, eth_qty, "IOC")
-                engine.submit_order("BTC-USDT", "BUY", "MARKET", 0.0, btc_qty, "IOC")
+                engine.submit_order(
+                    "ETH-USDT", "SELL", "MARKET", 0.0, eth_qty, "IOC", account_id=STRAT_ACCOUNT
+                )
+                engine.submit_order(
+                    "BTC-USDT", "BUY", "MARKET", 0.0, btc_qty, "IOC", account_id=STRAT_ACCOUNT
+                )
                 in_trade = True
                 trade_side = "SHORT_ETH"
 
@@ -202,7 +215,7 @@ def run_stat_arb_simulation():
                 exit_reason = "STOP LOSS (Divergence Blowout)"
 
             if should_exit:
-                flatten_positions(engine)
+                flatten_positions(engine, account_id=STRAT_ACCOUNT)
                 action = exit_reason
                 in_trade = False
                 trade_side = None
@@ -215,13 +228,13 @@ def run_stat_arb_simulation():
     # 5. Flatten any remaining inventory at end of simulation for clean accounting
     if in_trade:
         print("\n[End of Sim] Flattening open arbitrage positions...")
-        flatten_positions(engine)
+        flatten_positions(engine, account_id=STRAT_ACCOUNT)
 
     # 6. Final Portfolio Summary
-    acct = engine.get_account("DEFAULT")
-    positions = engine.get_positions("DEFAULT")
+    acct = engine.get_account(STRAT_ACCOUNT)
+    positions = engine.get_positions(STRAT_ACCOUNT)
     print("\n" + "=" * 70)
-    print("Simulation Complete - Strategy Account Summary (Isolated):")
+    print(f"Simulation Complete - Strategy Account [{STRAT_ACCOUNT}] Summary (Isolated):")
     print(
         f"Strategy Cash Balance: ${acct.cash_balance:,.2f} | "
         f"Realized PnL: ${acct.realized_pnl:>+8.2f}"
@@ -238,12 +251,19 @@ def run_stat_arb_simulation():
 
     print("\nSimulator Internal Accounts (Isolated):")
     for acct_id in sorted(engine.get_all_account_ids()):
-        if acct_id != "DEFAULT":
-            sim_acct = engine.get_account(acct_id)
-            print(
-                f"  Account [{acct_id:<9}]: Cash=${sim_acct.cash_balance:,.2f} | "
-                f"Realized PnL=${sim_acct.realized_pnl:>+8.2f}"
-            )
+        if acct_id == STRAT_ACCOUNT:
+            continue
+        # Suppress DEFAULT account if it was never used (no trades / 0 PnL and no positions)
+        if acct_id == "DEFAULT":
+            def_acct = engine.get_account("DEFAULT")
+            def_positions = engine.get_positions("DEFAULT")
+            if def_acct.realized_pnl == 0.0 and not def_positions:
+                continue
+        sim_acct = engine.get_account(acct_id)
+        print(
+            f"  Account [{acct_id:<9}]: Cash=${sim_acct.cash_balance:,.2f} | "
+            f"Realized PnL=${sim_acct.realized_pnl:>+8.2f}"
+        )
     print("=" * 70)
 
 

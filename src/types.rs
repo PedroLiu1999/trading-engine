@@ -44,17 +44,12 @@ impl fmt::Display for OrderType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum TimeInForce {
+    #[default]
     GTC, // Good 'Til Cancelled
     IOC, // Immediate Or Cancel
     FOK, // Fill Or Kill
-}
-
-impl Default for TimeInForce {
-    fn default() -> Self {
-        TimeInForce::GTC
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -90,13 +85,14 @@ pub struct Order {
     pub quantity: f64,
     pub filled_quantity: f64,
     pub remaining_quantity: f64,
-    pub time_in_force: TimeInForce,
     pub status: OrderStatus,
+    pub time_in_force: TimeInForce,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 impl Order {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: OrderId,
         client_order_id: Option<String>,
@@ -120,6 +116,7 @@ impl Order {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_account(
         id: OrderId,
         client_order_id: Option<String>,

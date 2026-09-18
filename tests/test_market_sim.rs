@@ -18,6 +18,7 @@ fn test_cholesky_decomposition_2x2() {
 }
 
 #[test]
+#[allow(clippy::needless_range_loop)]
 fn test_cholesky_decomposition_3x3() {
     let corr = vec![
         vec![1.0, 0.8, 0.5],

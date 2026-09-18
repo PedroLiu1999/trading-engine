@@ -66,6 +66,7 @@ impl ExecutionEngine {
         self.order_seq.fetch_add(1, Ordering::SeqCst)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_order(
         &self,
         client_order_id: Option<String>,
@@ -88,6 +89,7 @@ impl ExecutionEngine {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_order_with_account(
         &self,
         client_order_id: Option<String>,

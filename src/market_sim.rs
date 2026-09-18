@@ -78,6 +78,7 @@ impl FastRng {
 }
 
 /// Performs Cholesky decomposition of a symmetric positive-definite matrix: Sigma = L * L^T.
+#[allow(clippy::needless_range_loop)]
 pub fn cholesky(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
     let n = matrix.len();
     if n == 0 {
@@ -172,6 +173,7 @@ impl MultiAssetMarketSim {
     }
 
     /// Advances the simulation by dt (seconds, e.g. 0.1 for 100ms or 1.0 for 1s).
+    #[allow(clippy::needless_range_loop)]
     pub fn step(&mut self, dt: f64) -> HashMap<String, f64> {
         let dt = if dt <= 0.0 { 1.0 } else { dt };
         let n = self.assets.len();

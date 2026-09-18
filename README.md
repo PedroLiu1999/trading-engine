@@ -209,5 +209,21 @@ uv run pytest tests/
 
 ---
 
+## Performance & Benchmarking
+
+Run the built-in end-to-end performance and ultra-low latency benchmark suite:
+
+```bash
+uv run python examples/benchmark.py
+```
+
+Options:
+- `--orders N`: Number of orders to benchmark for insertion, matching, and cancellation (default: `25,000`)
+- `--depth-queries N`: Number of L2 order book depth snapshots (default: `50,000`)
+- `--sim-steps N`: Number of multi-asset simulation steps (default: `500`)
+- `--quick`: Fast iteration benchmark with smaller sample sizes
+
+---
+
 ## License
 MIT

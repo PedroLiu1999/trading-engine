@@ -42,12 +42,21 @@ class KrakenTrade:
 
 
 @dataclass
+class KrakenBookDelta:
+    timestamp: float
+    side: str  # "BUY" or "SELL"
+    price: float
+    quantity: float  # 0.0 indicates level was removed/cancelled
+
+
+@dataclass
 class KrakenMarketSession:
     pair: str
     captured_at: float
     bids: list[tuple[float, float]]  # (price, quantity)
     asks: list[tuple[float, float]]  # (price, quantity)
     trades: list[KrakenTrade]
+    deltas: list[KrakenBookDelta] | None = None
 
 
 class KrakenClient:
@@ -113,89 +122,16 @@ class KrakenClient:
         pair_key = next(k for k in res.keys() if k != "last")
         return res[pair_key]
 
-    def fetch_historical_trades(
-        self,
-        pair: str = "ETHUSD",
-        max_trades: int = 5000,
-        delay_sec: float = 0.3,
-        since: int | None = None,
-        lookback_hours: float | None = None,
-    ) -> list[Any]:
-        """Fetches a long history of public trades by paginating the Kraken `since` cursor.
-
-        If `max_trades > 1000` and `since` is not specified, probes recent trade velocity
-        to estimate an earlier starting timestamp in nanoseconds, allowing multi-page
-        pagination forward to collect thousands of historical trades.
-        """
-        if since is None:
-            if lookback_hours is not None:
-                since = int((time.time() - (lookback_hours * 3600.0)) * 1e9)
-            elif max_trades > 1000:
-                # Probe current trade rate to calculate appropriate lookback
-                try:
-                    probe = self._get("Trades", {"pair": pair})
-                    p_key = next(k for k in probe.keys() if k != "last")
-                    sample = probe[p_key]
-                    if len(sample) >= 10:
-                        t_start = float(sample[0][2])
-                        t_end = float(sample[-1][2])
-                        dt = max(t_end - t_start, 10.0)
-                        rate = len(sample) / dt  # trades per second
-                        # Buffer by 40% to guarantee capturing at least max_trades
-                        est_seconds = (max_trades / max(rate, 0.05)) * 1.4
-                        since = int((time.time() - est_seconds) * 1e9)
-                except Exception:
-                    pass
-
-        all_trades: list[Any] = []
-        seen_tids: set[str] = set()
-
-        while len(all_trades) < max_trades:
-            params: dict[str, Any] = {"pair": pair}
-            if since is not None:
-                params["since"] = since
-
-            res = self._get("Trades", params)
-            pair_key = next(k for k in res.keys() if k != "last")
-            batch = res[pair_key]
-            if not batch:
-                break
-
-            for item in batch:
-                tid = str(item[6]) if len(item) > 6 else f"{item[2]}_{item[0]}_{item[1]}"
-                if tid not in seen_tids:
-                    seen_tids.add(tid)
-                    all_trades.append(item)
-
-            next_since = res.get("last")
-            if next_since is None or next_since == since or len(batch) == 0:
-                break
-            since = next_since
-
-            if len(all_trades) >= max_trades:
-                break
-            time.sleep(delay_sec)
-
-        return all_trades[:max_trades]
-
     def record_session(
         self,
         pair: str = "ETHUSD",
         depth_count: int = 100,
-        max_trades: int = 5000,
         output_format: str = "parquet",
         output_dir: str = "examples/data",
-        since: int | None = None,
-        lookback_hours: float | None = None,
     ) -> KrakenMarketSession:
-        """Fetches a synchronized order book snapshot and paginated trade sequence."""
+        """Fetches a synchronized live order book snapshot and recent public trades via REST."""
         depth = self.fetch_depth(pair=pair, count=depth_count)
-        raw_trades = self.fetch_historical_trades(
-            pair=pair,
-            max_trades=max_trades,
-            since=since,
-            lookback_hours=lookback_hours,
-        )
+        raw_trades = self.fetch_trades(pair=pair)
 
         bids = [(float(p), float(q)) for p, q, *_ in depth["bids"]]
         asks = [(float(p), float(q)) for p, q, *_ in depth["asks"]]
@@ -241,8 +177,13 @@ class KrakenClient:
         return session
 
     @staticmethod
-    def save_to_parquet(session: KrakenMarketSession, depth_file: str, trades_file: str) -> None:
-        """Saves session L2 depth and trade history to compressed Apache Parquet format."""
+    def save_to_parquet(
+        session: KrakenMarketSession,
+        depth_file: str,
+        trades_file: str,
+        deltas_file: str | None = None,
+    ) -> None:
+        """Saves session L2 depth, trade history, and optional deltas to compressed Parquet."""
         if not HAS_PYARROW:
             raise ImportError("pyarrow is required for Parquet export. Run `uv add pyarrow`.")
 
@@ -282,9 +223,29 @@ class KrakenClient:
         )
         pq.write_table(trades_table, trades_file, compression="snappy")
 
+        # 3. Optional Deltas Table
+        if session.deltas and deltas_file:
+            d_ts = [d.timestamp for d in session.deltas]
+            d_sides = [d.side for d in session.deltas]
+            d_prices = [d.price for d in session.deltas]
+            d_qtys = [d.quantity for d in session.deltas]
+            deltas_table = pa.Table.from_arrays(
+                [
+                    pa.array(d_ts, type=pa.float64()),
+                    pa.array(d_sides, type=pa.string()),
+                    pa.array(d_prices, type=pa.float64()),
+                    pa.array(d_qtys, type=pa.float64()),
+                ],
+                names=["timestamp", "side", "price", "quantity"],
+            )
+            pq.write_table(deltas_table, deltas_file, compression="snappy")
+
     @staticmethod
     def load_from_parquet(
-        depth_file: str, trades_file: str, pair: str = "ETHUSD"
+        depth_file: str,
+        trades_file: str,
+        pair: str = "ETHUSD",
+        deltas_file: str | None = None,
     ) -> KrakenMarketSession:
         """Fast zero-copy loader from Apache Parquet files."""
         if not HAS_PYARROW:
@@ -325,6 +286,18 @@ class KrakenClient:
                 )
             )
 
+        deltas: list[KrakenBookDelta] | None = None
+        if deltas_file and Path(deltas_file).exists():
+            deltas_table = pq.read_table(deltas_file)
+            d_ts = deltas_table["timestamp"].to_pylist()
+            d_sides = deltas_table["side"].to_pylist()
+            d_prices = deltas_table["price"].to_pylist()
+            d_qtys = deltas_table["quantity"].to_pylist()
+            deltas = [
+                KrakenBookDelta(timestamp=ts, side=s, price=p, quantity=q)
+                for ts, s, p, q in zip(d_ts, d_sides, d_prices, d_qtys)
+            ]
+
         captured_at = trades[0].timestamp if trades else time.time()
         return KrakenMarketSession(
             pair=pair,
@@ -332,6 +305,7 @@ class KrakenClient:
             bids=bids,
             asks=asks,
             trades=trades,
+            deltas=deltas,
         )
 
     @staticmethod
@@ -405,19 +379,181 @@ class KrakenClient:
         if p.is_dir():
             depth_pq = p / f"kraken_{pair.lower()}_depth.parquet"
             trades_pq = p / f"kraken_{pair.lower()}_trades.parquet"
+            deltas_pq = p / f"kraken_{pair.lower()}_deltas.parquet"
             if depth_pq.exists() and trades_pq.exists():
-                return cls.load_from_parquet(str(depth_pq), str(trades_pq), pair=pair)
+                return cls.load_from_parquet(
+                    str(depth_pq),
+                    str(trades_pq),
+                    pair=pair,
+                    deltas_file=str(deltas_pq) if deltas_pq.exists() else None,
+                )
 
             json_file = p / f"kraken_{pair.lower()}_sample.json"
             if json_file.exists():
                 return cls.load_from_json(str(json_file))
 
         if str(path).endswith(".parquet"):
-            # Assume paired trades file
             base = str(path).replace("_depth.parquet", "").replace("_trades.parquet", "")
-            return cls.load_from_parquet(f"{base}_depth.parquet", f"{base}_trades.parquet", pair)
+            deltas_pq = f"{base}_deltas.parquet"
+            return cls.load_from_parquet(
+                f"{base}_depth.parquet",
+                f"{base}_trades.parquet",
+                pair=pair,
+                deltas_file=deltas_pq if Path(deltas_pq).exists() else None,
+            )
 
         return cls.load_from_json(path)
+
+
+class KrakenWebSocketRecorder:
+    """Streams and records authentic live Level 2 order book snapshots, deltas,
+    and market trades from Kraken WebSocket API v2 directly to Apache Parquet.
+    """
+
+    WS_URL = "wss://ws.kraken.com/v2"
+
+    def __init__(self, pair: str = "ETH/USD", depth: int = 100):
+        self.pair = pair.replace("-", "/").upper()
+        self.depth = depth
+
+    async def record_stream(
+        self,
+        duration_seconds: float = 60.0,
+        max_updates: int | None = None,
+        output_dir: str = "examples/data",
+    ) -> KrakenMarketSession:
+        """Connects to Kraken WebSocket v2, records L2 book deltas and trades,
+        and saves the session to Parquet.
+        """
+        import asyncio
+
+        import websockets
+
+        bids: list[tuple[float, float]] = []
+        asks: list[tuple[float, float]] = []
+        deltas: list[KrakenBookDelta] = []
+        trades: list[KrakenTrade] = []
+        captured_at = time.time()
+        update_count = 0
+        start_time = time.time()
+
+        print(f"Connecting to Kraken WebSocket API v2 ({self.WS_URL})...")
+        async with websockets.connect(self.WS_URL, ping_interval=20, ping_timeout=10) as ws:
+            book_sub = {
+                "method": "subscribe",
+                "params": {
+                    "channel": "book",
+                    "symbol": [self.pair],
+                    "depth": self.depth,
+                },
+            }
+            await ws.send(json.dumps(book_sub))
+
+            trade_sub = {
+                "method": "subscribe",
+                "params": {
+                    "channel": "trade",
+                    "symbol": [self.pair],
+                },
+            }
+            await ws.send(json.dumps(trade_sub))
+            print(f"Subscribed to book (depth={self.depth}) and trade channels for {self.pair}...")
+
+            while True:
+                now = time.time()
+                if duration_seconds is not None and (now - start_time) >= duration_seconds:
+                    break
+                if max_updates is not None and update_count >= max_updates:
+                    break
+
+                try:
+                    raw_msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                except TimeoutError:
+                    continue
+
+                msg = json.loads(raw_msg)
+                channel = msg.get("channel")
+                msg_type = msg.get("type")
+                data_list = msg.get("data", [])
+
+                if channel == "book":
+                    if msg_type == "snapshot" and data_list:
+                        snap = data_list[0]
+                        bids = [(float(b["price"]), float(b["qty"])) for b in snap.get("bids", [])]
+                        asks = [(float(a["price"]), float(a["qty"])) for a in snap.get("asks", [])]
+                        captured_at = time.time()
+                    elif msg_type == "update" and data_list:
+                        upd = data_list[0]
+                        ts = time.time()
+                        for b in upd.get("bids", []):
+                            deltas.append(
+                                KrakenBookDelta(
+                                    timestamp=ts,
+                                    side="BUY",
+                                    price=float(b["price"]),
+                                    quantity=float(b["qty"]),
+                                )
+                            )
+                            update_count += 1
+                        for a in upd.get("asks", []):
+                            deltas.append(
+                                KrakenBookDelta(
+                                    timestamp=ts,
+                                    side="SELL",
+                                    price=float(a["price"]),
+                                    quantity=float(a["qty"]),
+                                )
+                            )
+                            update_count += 1
+
+                elif channel == "trade" and data_list:
+                    for t in data_list:
+                        ts = time.time()
+                        side = "BUY" if t.get("side", "").lower() == "buy" else "SELL"
+                        trades.append(
+                            KrakenTrade(
+                                price=float(t["price"]),
+                                quantity=float(t["qty"]),
+                                timestamp=ts,
+                                side=side,
+                                order_type="MARKET",
+                                trade_id=int(t.get("trade_id", 0)),
+                            )
+                        )
+                        update_count += 1
+
+        session = KrakenMarketSession(
+            pair=self.pair,
+            captured_at=captured_at,
+            bids=bids,
+            asks=asks,
+            trades=trades,
+            deltas=deltas,
+        )
+
+        os.makedirs(output_dir, exist_ok=True)
+        pair_clean = self.pair.lower().replace("/", "")
+        depth_pq = os.path.join(output_dir, f"kraken_{pair_clean}_depth.parquet")
+        trades_pq = os.path.join(output_dir, f"kraken_{pair_clean}_trades.parquet")
+        deltas_pq = os.path.join(output_dir, f"kraken_{pair_clean}_deltas.parquet")
+
+        KrakenClient.save_to_parquet(session, depth_pq, trades_pq, deltas_file=deltas_pq)
+        print(
+            f"Saved WebSocket session to Parquet ({len(bids)} bids, {len(asks)} asks, "
+            f"{len(deltas)} deltas, {len(trades)} trades) in {output_dir}"
+        )
+        return session
+
+    def record(
+        self,
+        duration_seconds: float = 60.0,
+        max_updates: int | None = None,
+        output_dir: str = "examples/data",
+    ) -> KrakenMarketSession:
+        """Synchronous wrapper for record_stream."""
+        import asyncio
+
+        return asyncio.run(self.record_stream(duration_seconds, max_updates, output_dir))
 
 
 class KrakenOrderBookReplayer:
@@ -437,30 +573,49 @@ class KrakenOrderBookReplayer:
         self.maker_account = maker_account
         self.taker_account = taker_account
         self._current_trade_idx = 0
+        self._current_delta_idx = 0
+
+    def apply_deltas_until(self, timestamp: float) -> int:
+        """Applies real-time order book additions and updates up to the given timestamp."""
+        if not self.session.deltas:
+            return 0
+
+        applied = 0
+        while self._current_delta_idx < len(self.session.deltas):
+            delta = self.session.deltas[self._current_delta_idx]
+            if delta.timestamp > timestamp:
+                break
+
+            self._current_delta_idx += 1
+            applied += 1
+
+            if delta.quantity > 0.0:
+                try:
+                    self.engine.submit_order(
+                        symbol=self.symbol,
+                        side=delta.side,
+                        order_type="LIMIT",
+                        price=delta.price,
+                        quantity=delta.quantity,
+                        time_in_force="GTC",
+                        account_id=self.maker_account,
+                    )
+                except Exception:
+                    pass
+
+        return applied
 
     def seed_initial_book(self) -> None:
         """Seeds the trading engine's order book with Kraken's authentic bid/ask ladders."""
-        shift = 0.0
-        if self.session.trades and self.session.bids and self.session.asks:
-            best_bid = self.session.bids[0][0]
-            best_ask = self.session.asks[0][0]
-            start_price = self.session.trades[0].price
-            # Only shift if initial trade is significantly outside prevailing spread
-            if start_price < best_bid or start_price > best_ask:
-                snapshot_mid = (best_bid + best_ask) / 2.0
-                if abs(start_price - snapshot_mid) > (best_ask - best_bid):
-                    shift = round(start_price - snapshot_mid, 2)
-
         # Insert bids from lowest to highest so higher bids rest properly in price-time queue
         for price, qty in reversed(self.session.bids):
-            p = round(price + shift, 2)
-            if qty > 0.0 and p > 0.0:
+            if qty > 0.0 and price > 0.0:
                 try:
                     self.engine.submit_order(
                         symbol=self.symbol,
                         side="BUY",
                         order_type="LIMIT",
-                        price=p,
+                        price=price,
                         quantity=qty,
                         time_in_force="GTC",
                         account_id=self.maker_account,
@@ -470,55 +625,19 @@ class KrakenOrderBookReplayer:
 
         # Insert asks from highest to lowest
         for price, qty in reversed(self.session.asks):
-            p = round(price + shift, 2)
-            if qty > 0.0 and p > 0.0:
+            if qty > 0.0 and price > 0.0:
                 try:
                     self.engine.submit_order(
                         symbol=self.symbol,
                         side="SELL",
                         order_type="LIMIT",
-                        price=p,
+                        price=price,
                         quantity=qty,
                         time_in_force="GTC",
                         account_id=self.maker_account,
                     )
                 except Exception:
                     pass
-
-    def ensure_depth(self, reference_price: float) -> None:
-        """Ensures that the order book has active two-sided liquidity around reference_price."""
-        if reference_price <= 0.0:
-            return
-        try:
-            depth = self.engine.get_depth(self.symbol, max_depth=5)
-            if len(depth.bids) < 3:
-                for step in range(1, 4):
-                    p = round(reference_price - (step * 0.25), 2)
-                    if p > 0:
-                        self.engine.submit_order(
-                            symbol=self.symbol,
-                            side="BUY",
-                            order_type="LIMIT",
-                            price=p,
-                            quantity=10.0 * step,
-                            time_in_force="GTC",
-                            account_id=self.maker_account,
-                        )
-            if len(depth.asks) < 3:
-                for step in range(1, 4):
-                    p = round(reference_price + (step * 0.25), 2)
-                    if p > 0:
-                        self.engine.submit_order(
-                            symbol=self.symbol,
-                            side="SELL",
-                            order_type="LIMIT",
-                            price=p,
-                            quantity=10.0 * step,
-                            time_in_force="GTC",
-                            account_id=self.maker_account,
-                        )
-        except Exception:
-            pass
 
     def has_next_trade(self) -> bool:
         return self._current_trade_idx < len(self.session.trades)
@@ -530,9 +649,6 @@ class KrakenOrderBookReplayer:
 
         trade = self.session.trades[self._current_trade_idx]
         self._current_trade_idx += 1
-
-        # Ensure active liquidity exists prior to taker trade execution
-        self.ensure_depth(trade.price)
 
         # Real market taker flow crosses the book as a MARKET IOC order
         try:
@@ -547,9 +663,6 @@ class KrakenOrderBookReplayer:
             )
         except Exception:
             pass
-
-        # Replenish book depth after trade execution
-        self.ensure_depth(trade.price)
 
         return trade
 

@@ -17,20 +17,24 @@ from ._trading_engine import (
     Trade,
 )
 from .kraken import (
+    KrakenBookDelta,
     KrakenClient,
     KrakenMarketSession,
     KrakenOrderBookReplayer,
     KrakenTrade,
+    KrakenWebSocketRecorder,
 )
 
 __all__ = [
     "Account",
     "AssetConfig",
     "Engine",
+    "KrakenBookDelta",
     "KrakenClient",
     "KrakenMarketSession",
     "KrakenOrderBookReplayer",
     "KrakenTrade",
+    "KrakenWebSocketRecorder",
     "LevelQuote",
     "MarketDepth",
     "MultiAssetMarketSim",

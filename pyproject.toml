@@ -40,4 +40,5 @@ python_files = ["test_*.py"]
 dev = [
     "pyarrow>=25.0.1",
     "matplotlib>=3.8.0",
+    "websockets>=17.1",
 ]

@@ -126,6 +126,10 @@ def run_single_kraken_backtest(
     trade_limit = min(trade_limit, len(session.trades))
 
     for trade_idx in range(trade_limit):
+        # 1. Apply any real-time book update deltas up to this trade timestamp
+        if trade_idx < len(session.trades):
+            replayer.apply_deltas_until(session.trades[trade_idx].timestamp)
+
         depth = engine.get_depth(symbol, levels=4)
         if not depth:
             replayer.replay_next_trade()
@@ -773,11 +777,11 @@ def main():
         help="Limit replay to N trades for backtest mode (default: all recorded trades)",
     )
     parser.add_argument(
-        "--fetch-history",
-        type=int,
+        "--record-ws",
+        type=float,
         default=None,
-        metavar="N",
-        help="Download N historical trades from Kraken API and save to Parquet",
+        metavar="SECONDS",
+        help="Record live L2 book depth, deltas, and trades via WebSocket to Parquet",
     )
     parser.add_argument(
         "--refresh",
@@ -819,30 +823,35 @@ def main():
     pair_clean = args.pair.lower().replace("/", "")
     depth_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_depth.parquet")
     trades_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_trades.parquet")
+    deltas_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_deltas.parquet")
 
-    should_fetch = (
-        args.refresh
-        or (args.fetch_history is not None)
-        or not (Path(depth_pq).exists() and Path(trades_pq).exists())
-    )
+    if args.record_ws:
+        from trading_engine import KrakenWebSocketRecorder
 
-    if should_fetch:
-        target_trades = args.fetch_history or 5000
-        print(f"Fetching {target_trades} historical trades for {args.pair} from Kraken API...")
+        recorder = KrakenWebSocketRecorder(pair=args.pair)
+        print(f"Recording Kraken WebSocket v2 live feed for {args.record_ws} seconds...")
+        session = recorder.record(duration_seconds=args.record_ws, output_dir=args.data_dir)
+    elif args.refresh or not (Path(depth_pq).exists() and Path(trades_pq).exists()):
+        print(f"Fetching fresh live order book and trades for {args.pair} from Kraken API...")
         session = client.record_session(
             pair=args.pair,
             depth_count=100,
-            max_trades=target_trades,
             output_format="parquet",
             output_dir=args.data_dir,
         )
     else:
         print(f"Loading cached Kraken Parquet dataset ({args.pair})...")
-        session = client.load_from_parquet(depth_pq, trades_pq, pair=args.pair)
+        session = client.load_from_parquet(
+            depth_pq,
+            trades_pq,
+            pair=args.pair,
+            deltas_file=deltas_pq if Path(deltas_pq).exists() else None,
+        )
 
+    delta_info = f", {len(session.deltas)} L2 book deltas" if session.deltas else ""
     print(
-        f"Session loaded: {len(session.bids)} bids, {len(session.asks)} asks, "
-        f"{len(session.trades)} historical market trades."
+        f"Session loaded: {len(session.bids)} bids, {len(session.asks)} asks"
+        f"{delta_info}, {len(session.trades)} market trades."
     )
 
     print("=" * 75)

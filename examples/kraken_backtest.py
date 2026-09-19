@@ -222,7 +222,7 @@ def run_single_kraken_backtest(
                             curr_order = engine.get_order(symbol, resting_order_id)
                             if (
                                 curr_order is None
-                                or str(curr_order.side).upper() != desired_side
+                                or (desired_side not in str(curr_order.side).upper())
                                 or abs(curr_order.price - desired_price) > 0.001
                             ):
                                 try:
@@ -266,7 +266,7 @@ def run_single_kraken_backtest(
                             curr_order = engine.get_order(symbol, resting_order_id)
                             if (
                                 curr_order is None
-                                or str(curr_order.side).upper() != random_desired_side
+                                or (random_desired_side not in str(curr_order.side).upper())
                                 or abs(curr_order.price - desired_price) > 0.001
                             ):
                                 try:
@@ -663,7 +663,7 @@ async def _async_run_kraken_live_stream(
                         curr_order = engine.get_order(symbol, resting_order_id)
                         if (
                             curr_order is None
-                            or str(curr_order.side).upper() != desired_side
+                            or (desired_side not in str(curr_order.side).upper())
                             or abs(curr_order.price - desired_price) > 0.001
                         ):
                             try:
@@ -748,6 +748,7 @@ async def _async_run_kraken_live_stream(
                     curr_order = engine.get_order(symbol, resting_order_id)
                     if (
                         curr_order is None
+                        or (exit_side not in str(curr_order.side).upper())
                         or abs(curr_order.price - exit_price) > 0.001
                         or abs(curr_order.remaining_quantity - abs(curr_qty)) > 0.001
                     ):

@@ -209,15 +209,15 @@ uv run pytest tests/
 
 ---
 
-## Real-Market Kraken Order Book Backtesting
+## Real-Market Kraken Order Book Backtesting & Live Execution
 
-Backtest strategies against authentic exchange Level 2 order book depth, tick-by-tick maker book deltas, and real market taker executions stored in compressed Apache Parquet format:
+Backtest quantitative strategies against authentic exchange Level 2 order book depth, tick-by-tick maker book deltas, and real market taker executions stored in compressed Apache Parquet format, or run live in real-time directly over Kraken WebSocket API v2:
 
 ```bash
 # 1. Record authentic Kraken L2 snapshots, book deltas, and trades via WebSocket v2 (default: 60s)
 uv run python examples/kraken_backtest.py --record
 
-# Record for a custom duration (e.g. 120 seconds)
+# Record for a custom duration (e.g. 120 seconds or 600 seconds)
 uv run python examples/kraken_backtest.py --record 120
 
 # 2. Run backtest on cached Kraken L2 Parquet dataset (OBI Scalper vs. Random Baseline)
@@ -226,19 +226,24 @@ uv run python examples/kraken_backtest.py
 # Force re-record a fresh WebSocket L2 session, overwriting cached Parquet
 uv run python examples/kraken_backtest.py --refresh
 
+# Limit replay to the first N market trades
+uv run python examples/kraken_backtest.py --max-trades 500
+
 # Custom plot output path (default: examples/charts/kraken_pnl_chart.png)
 uv run python examples/kraken_backtest.py --plot-file examples/charts/my_pnl_chart.png
 
-# Continuously stream live market trades and execute in real-time until Ctrl+C
-uv run python examples/kraken_backtest.py --live --pair ETHUSD
+# Continuously stream live market deltas and trades with real-time heartbeat (Ctrl+C to stop)
+uv run python examples/kraken_backtest.py --live --pair ETH/USD --live-depth 25
 ```
 
-### Key Capabilities
-- **Full Level 2 Depth & Deltas (`KrakenWebSocketRecorder`)**: Connects to `wss://ws.kraken.com/v2` to capture the true initial order book snapshot alongside all subsequent maker order additions, quote modifications, and cancellations (`KrakenBookDelta`).
-- **Authentic Microstructure Replay (`KrakenOrderBookReplayer`)**: Reconstructs the exact state of the exchange order book prior to each trade execution by synchronizing maker deltas chronologically with `apply_deltas_until(timestamp)`.
-- **Zero-Copy Parquet Storage**: Fast columnar storage (`pyarrow`) splitting depth, deltas, and executions into compressed, reproducible files in `examples/data/`.
-- **Realistic Queue Position**: Passive strategy orders join the authentic exchange queue at price levels with price-time (FIFO) priority behind resting liquidity.
-- **True Order-Flow Toxicity**: Real market taker trades walk the book, subjecting limit orders to adverse selection and sweep dynamics.
+### Key Capabilities & Correctness Guarantees
+- **Single Source of Truth for Liquidity**: Book deltas serve as the exclusive mutator of maker liquidity (`KRAKEN_MAKER`). Taker trades never deduct liquidity a second time against maker queues; instead, they act strictly as fill triggers for strategy resting orders (`try_fill_resting`), preventing double-counting taker impact.
+- **Zero Lookahead Bias & Tie-Breaking**: Enforces strict `<` timestamp ordering between book deltas and market trades. A monotonic sequence number (`seq`) recorded at capture time unambiguously resolves millisecond timestamp collisions (`delta.timestamp == trade.timestamp and delta.seq >= trade.seq` stops cursor advance).
+- **Orphan-Free Order Lifecycle**: Gating entry completion on `abs(curr_qty) >= ORDER_QTY * 0.99` preserves `resting_order_id` on partial fills and eliminates accidental two-sided quoting or orphaned remaining quantities.
+- **Deep-Copy Session Isolation**: Multi-run comparisons (e.g., OBI Strategy vs. Random Baseline) execute on isolated deep-copied sessions, strictly asserting post-run immutability of recorded deltas, trades, and initial book snapshots.
+- **Full WebSocket v2 & REST Pair Normalization**: Cleanly separates WS v2 (`ETH/USD`) and REST (`ETHUSD`/`XETHZUSD`) symbology, eliminating silent polling exceptions or key-guessing failures.
+- **100% Live Engine Parity with Heartbeat**: Live mode consumes the exact same WebSocket v2 streams (`wss://ws.kraken.com/v2`), dynamically repricing strategy orders on book deltas and filling on trade events, accompanied by a 1-second live heartbeat telemetry dashboard.
+- **Chunked Parquet Streaming & Graceful Interruption**: WebSocket recorder streams raw data into partitioned Parquet files (`pyarrow`) on disk every 500 deltas or 20 trades, guaranteeing clean flush and zero data loss on user `Ctrl+C`.
 - **Automated Performance Visualizations**: Generates dark-themed high-resolution performance plots in `examples/charts/` comparing strategy vs. random baseline realized PnL, drawdown underwater curves, and price trajectories.
 
 ---

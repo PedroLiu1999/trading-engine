@@ -122,60 +122,6 @@ class KrakenClient:
         pair_key = next(k for k in res.keys() if k != "last")
         return res[pair_key]
 
-    def record_session(
-        self,
-        pair: str = "ETHUSD",
-        depth_count: int = 100,
-        output_format: str = "parquet",
-        output_dir: str = "examples/data",
-    ) -> KrakenMarketSession:
-        """Fetches a synchronized live order book snapshot and recent public trades via REST."""
-        depth = self.fetch_depth(pair=pair, count=depth_count)
-        raw_trades = self.fetch_trades(pair=pair)
-
-        bids = [(float(p), float(q)) for p, q, *_ in depth["bids"]]
-        asks = [(float(p), float(q)) for p, q, *_ in depth["asks"]]
-
-        trades: list[KrakenTrade] = []
-        for item in raw_trades:
-            price = float(item[0])
-            qty = float(item[1])
-            ts = float(item[2])
-            side = "BUY" if item[3] == "b" else "SELL"
-            ord_type = "MARKET" if item[4] == "m" else "LIMIT"
-            tid = int(item[6]) if len(item) > 6 else 0
-            trades.append(
-                KrakenTrade(
-                    price=price,
-                    quantity=qty,
-                    timestamp=ts,
-                    side=side,
-                    order_type=ord_type,
-                    trade_id=tid,
-                )
-            )
-
-        session = KrakenMarketSession(
-            pair=pair,
-            captured_at=time.time(),
-            bids=bids,
-            asks=asks,
-            trades=trades,
-        )
-
-        os.makedirs(output_dir, exist_ok=True)
-        pair_clean = pair.lower().replace("/", "")
-
-        if output_format.lower() == "parquet":
-            depth_file = os.path.join(output_dir, f"kraken_{pair_clean}_depth.parquet")
-            trades_file = os.path.join(output_dir, f"kraken_{pair_clean}_trades.parquet")
-            self.save_to_parquet(session, depth_file, trades_file)
-        else:
-            json_file = os.path.join(output_dir, f"kraken_{pair_clean}_sample.json")
-            self.save_to_json(session, json_file)
-
-        return session
-
     @staticmethod
     def save_to_parquet(
         session: KrakenMarketSession,

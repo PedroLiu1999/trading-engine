@@ -777,16 +777,20 @@ def main():
         help="Limit replay to N trades for backtest mode (default: all recorded trades)",
     )
     parser.add_argument(
+        "--record",
         "--record-ws",
+        dest="record",
+        nargs="?",
+        const=60.0,
         type=float,
         default=None,
         metavar="SECONDS",
-        help="Record live L2 book depth, deltas, and trades via WebSocket to Parquet",
+        help="Record live L2 book depth, deltas, and trades via WebSocket (default: 60s)",
     )
     parser.add_argument(
         "--refresh",
         action="store_true",
-        help="Force re-fetching fresh trades and depth from Kraken, overwriting cached Parquet",
+        help="Force re-recording a fresh WebSocket L2 session, overwriting cached Parquet",
     )
     parser.add_argument(
         "--data-dir",
@@ -819,39 +823,43 @@ def main():
         )
         return
 
-    # Backtest Mode (Parquet Replay)
+    # Backtest Mode (Parquet Replay with Full L2 Depth & Deltas)
     pair_clean = args.pair.lower().replace("/", "")
     depth_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_depth.parquet")
     trades_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_trades.parquet")
     deltas_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_deltas.parquet")
 
-    if args.record_ws:
+    has_full_book = (
+        Path(depth_pq).exists() and Path(trades_pq).exists() and Path(deltas_pq).exists()
+    )
+
+    if args.record is not None or args.refresh or not has_full_book:
+        record_secs = args.record if args.record is not None else 60.0
         from trading_engine import KrakenWebSocketRecorder
 
+        if not has_full_book and args.record is None:
+            print(
+                f"No full L2 order book dataset (with deltas) found in {args.data_dir}.\n"
+                f"Recording {record_secs:.0f}s of live L2 book snapshots, deltas, and trades "
+                f"via WebSocket v2..."
+            )
+        else:
+            print(f"Recording Kraken WebSocket v2 live feed for {record_secs} seconds...")
+
         recorder = KrakenWebSocketRecorder(pair=args.pair)
-        print(f"Recording Kraken WebSocket v2 live feed for {args.record_ws} seconds...")
-        session = recorder.record(duration_seconds=args.record_ws, output_dir=args.data_dir)
-    elif args.refresh or not (Path(depth_pq).exists() and Path(trades_pq).exists()):
-        print(f"Fetching fresh live order book and trades for {args.pair} from Kraken API...")
-        session = client.record_session(
-            pair=args.pair,
-            depth_count=100,
-            output_format="parquet",
-            output_dir=args.data_dir,
-        )
+        session = recorder.record(duration_seconds=record_secs, output_dir=args.data_dir)
     else:
-        print(f"Loading cached Kraken Parquet dataset ({args.pair})...")
+        print(f"Loading cached Kraken L2 Parquet dataset ({args.pair})...")
         session = client.load_from_parquet(
             depth_pq,
             trades_pq,
             pair=args.pair,
-            deltas_file=deltas_pq if Path(deltas_pq).exists() else None,
+            deltas_file=deltas_pq,
         )
 
-    delta_info = f", {len(session.deltas)} L2 book deltas" if session.deltas else ""
     print(
-        f"Session loaded: {len(session.bids)} bids, {len(session.asks)} asks"
-        f"{delta_info}, {len(session.trades)} market trades."
+        f"Session loaded: {len(session.bids)} bids, {len(session.asks)} asks, "
+        f"{len(session.deltas or [])} L2 book deltas, {len(session.trades)} market trades."
     )
 
     print("=" * 75)

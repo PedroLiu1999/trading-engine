@@ -209,6 +209,32 @@ uv run pytest tests/
 
 ---
 
+## Real-Market Kraken Order Book Backtesting
+
+Backtest strategies against authentic exchange order book depth and historical public market taker executions stored in compressed Apache Parquet format:
+
+```bash
+# Run backtest on cached Kraken ETH/USD Parquet dataset (OBI Scalper vs. Random Baseline)
+uv run python examples/kraken_backtest.py
+
+# Download 5,000 (or 10,000) historical market trades from Kraken API and save to Parquet
+uv run python examples/kraken_backtest.py --fetch-history 5000
+
+# Force refresh order book depth snapshot and trade history from Kraken
+uv run python examples/kraken_backtest.py --refresh
+
+# Continuously stream live market trades and execute in real-time until Ctrl+C
+uv run python examples/kraken_backtest.py --live --pair ETHUSD
+```
+
+Features:
+- **No API Key Required**: Ingests public L2 depth snapshots and trade streams directly from Kraken REST API.
+- **Ultra-Fast Parquet Storage**: Uses Apache Parquet (`pyarrow`) for columnar, compressed, zero-copy tick reading across thousands of market trades.
+- **Realistic Queue Position**: Passive strategy orders join the authentic exchange queue at price levels with price-time priority behind resting market maker liquidity.
+- **True Order-Flow Toxicity**: Real market taker trades walk the book, subjecting passive limit orders to authentic adverse selection and sweep dynamics.
+
+---
+
 ## Performance & Benchmarks
 
 All figures below are measured using the automated benchmark suite ([examples/benchmark.py](file:///home/peter/quant/trading-engine/examples/benchmark.py)) across the Python API boundary (including PyO3 type conversion, pre-trade risk validation, FIFO queue operations, dual-sided ledger balance updates, and event bus publication).

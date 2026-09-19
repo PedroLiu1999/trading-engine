@@ -31,3 +31,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Data files
+*.parquet
+examples/data/

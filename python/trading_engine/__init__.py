@@ -16,11 +16,21 @@ from ._trading_engine import (
     TimeInForce,
     Trade,
 )
+from .kraken import (
+    KrakenClient,
+    KrakenMarketSession,
+    KrakenOrderBookReplayer,
+    KrakenTrade,
+)
 
 __all__ = [
     "Account",
     "AssetConfig",
     "Engine",
+    "KrakenClient",
+    "KrakenMarketSession",
+    "KrakenOrderBookReplayer",
+    "KrakenTrade",
     "LevelQuote",
     "MarketDepth",
     "MultiAssetMarketSim",

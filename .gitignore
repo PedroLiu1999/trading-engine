@@ -35,3 +35,6 @@ Thumbs.db
 # Data files
 *.parquet
 examples/data/
+
+# Chart outputs
+*.png

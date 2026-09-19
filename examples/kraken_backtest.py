@@ -74,7 +74,7 @@ def run_single_kraken_backtest(
     max_trades: int | None = None,
     seed: int = 101,
     verbose: bool = False,
-) -> tuple[int, float, float]:
+) -> tuple[int, float, float, list[dict[str, float]]]:
     """Runs a backtest of either OBI or Random baseline on a real Kraken market session."""
     is_random = mode.upper() == "RANDOM"
     strat_account = "RANDOM_BASELINE" if is_random else "OBI_SCALPER"
@@ -117,6 +117,8 @@ def run_single_kraken_backtest(
     peak_equity = 250_000.0
     max_drawdown = 0.0
 
+    pnl_history: list[dict[str, float]] = []
+
     rng = random.Random(seed + 777)
     random_desired_side = None
 
@@ -142,6 +144,23 @@ def run_single_kraken_backtest(
         equity = current_cash + unrealized
         peak_equity = max(peak_equity, equity)
         max_drawdown = max(max_drawdown, peak_equity - equity)
+
+        pnl_history.append(
+            {
+                "trade_idx": trade_idx,
+                "timestamp": (
+                    session.trades[trade_idx].timestamp
+                    if trade_idx < len(session.trades)
+                    else float(trade_idx)
+                ),
+                "realized_pnl": acct.realized_pnl if acct else 0.0,
+                "unrealized_pnl": unrealized,
+                "total_pnl": (acct.realized_pnl if acct else 0.0) + unrealized,
+                "drawdown": peak_equity - equity,
+                "mid_price": metrics["mid_price"],
+                "position": curr_qty,
+            }
+        )
 
         # Detect new fill
         if abs(curr_qty) > 0.0 and abs(prev_qty) < 0.001:
@@ -340,7 +359,132 @@ def run_single_kraken_backtest(
         )
     print("=" * 75)
 
-    return trades_executed, realized_pnl, max_drawdown
+    return trades_executed, realized_pnl, max_drawdown, pnl_history
+
+
+def plot_pnl_over_time(
+    obi_history: list[dict[str, float]],
+    rand_history: list[dict[str, float]],
+    symbol: str = "ETHUSD",
+    output_file: str = "examples/kraken_pnl_chart.png",
+) -> None:
+    """Generates a high-resolution dark-themed performance chart comparing OBI vs Random."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as ticker
+    except ImportError:
+        print("[Warning] Matplotlib not installed; skipping plot generation.")
+        return
+
+    if not obi_history:
+        return
+
+    trade_indices = [h["trade_idx"] for h in obi_history]
+    obi_pnl = [h["realized_pnl"] for h in obi_history]
+    obi_total_pnl = [h["total_pnl"] for h in obi_history]
+    obi_dd = [-h["drawdown"] for h in obi_history]
+    mid_prices = [h["mid_price"] for h in obi_history]
+
+    rand_indices = [h["trade_idx"] for h in rand_history]
+    rand_pnl = [h["realized_pnl"] for h in rand_history]
+    rand_total_pnl = [h["total_pnl"] for h in rand_history]
+    rand_dd = [-h["drawdown"] for h in rand_history]
+
+    plt.style.use("dark_background")
+    fig, (ax_pnl, ax_dd, ax_price) = plt.subplots(
+        3, 1, figsize=(14, 10), sharex=True, gridspec_kw={"height_ratios": [3, 1.5, 1.5]}
+    )
+    fig.patch.set_facecolor("#0f172a")
+
+    for ax in (ax_pnl, ax_dd, ax_price):
+        ax.set_facecolor("#1e293b")
+        ax.grid(True, linestyle="--", alpha=0.25, color="#94a3b8")
+        ax.tick_params(colors="#cbd5e1", labelsize=10)
+        for spine in ax.spines.values():
+            spine.set_color("#334155")
+
+    final_obi_pnl = obi_pnl[-1] if obi_pnl else 0.0
+    final_rand_pnl = rand_pnl[-1] if rand_pnl else 0.0
+
+    # Panel 1: Cumulative PnL ($)
+    ax_pnl.axhline(0, color="#64748b", linestyle=":", linewidth=1.2, alpha=0.7)
+    ax_pnl.plot(
+        trade_indices,
+        obi_pnl,
+        color="#38bdf8",
+        linewidth=2.0,
+        label=f"OBI Scalper Realized (${final_obi_pnl:>+6.2f})",
+    )
+    ax_pnl.plot(
+        trade_indices,
+        obi_total_pnl,
+        color="#06b6d4",
+        linewidth=1.0,
+        linestyle="--",
+        alpha=0.6,
+        label="OBI Scalper Total Equity",
+    )
+    ax_pnl.plot(
+        rand_indices,
+        rand_pnl,
+        color="#f97316",
+        linewidth=1.8,
+        label=f"Random Baseline Realized (${final_rand_pnl:>+6.2f})",
+    )
+    ax_pnl.plot(
+        rand_indices,
+        rand_total_pnl,
+        color="#fb923c",
+        linewidth=1.0,
+        linestyle="--",
+        alpha=0.6,
+        label="Random Baseline Total Equity",
+    )
+
+    ax_pnl.set_title(
+        f"Kraken Real-Market Order Book Backtest: {symbol} ({len(trade_indices):,} Market Trades)",
+        fontsize=14,
+        fontweight="bold",
+        color="#f8fafc",
+        pad=12,
+    )
+    ax_pnl.set_ylabel("Cumulative PnL ($)", fontsize=11, color="#f1f5f9", fontweight="bold")
+    ax_pnl.legend(loc="upper left", framealpha=0.8, facecolor="#0f172a", edgecolor="#475569")
+    ax_pnl.yaxis.set_major_formatter(ticker.FormatStrFormatter("$%.2f"))
+
+    # Panel 2: Drawdown Underwater Curve ($)
+    ax_dd.plot(trade_indices, obi_dd, color="#38bdf8", linewidth=1.2, label="OBI Drawdown")
+    ax_dd.fill_between(trade_indices, obi_dd, 0, color="#38bdf8", alpha=0.15)
+    ax_dd.plot(rand_indices, rand_dd, color="#f97316", linewidth=1.2, label="Random Drawdown")
+    ax_dd.fill_between(rand_indices, rand_dd, 0, color="#f97316", alpha=0.15)
+    ax_dd.set_ylabel("Drawdown ($)", fontsize=11, color="#f1f5f9", fontweight="bold")
+    ax_dd.legend(loc="lower left", framealpha=0.8, facecolor="#0f172a", edgecolor="#475569")
+    ax_dd.yaxis.set_major_formatter(ticker.FormatStrFormatter("$%.2f"))
+
+    # Panel 3: Underlying Market Price Trajectory
+    ax_price.plot(
+        trade_indices,
+        mid_prices,
+        color="#a855f7",
+        linewidth=1.5,
+        label=f"{symbol} Mid Price",
+    )
+    ax_price.set_ylabel("Price ($)", fontsize=11, color="#f1f5f9", fontweight="bold")
+    ax_price.set_xlabel(
+        "Historical Market Trade Index", fontsize=11, color="#f1f5f9", fontweight="bold"
+    )
+    ax_price.legend(loc="upper left", framealpha=0.8, facecolor="#0f172a", edgecolor="#475569")
+    ax_price.yaxis.set_major_formatter(ticker.FormatStrFormatter("$%.2f"))
+    ax_price.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{int(x):,}"))
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+    plt.savefig(output_file, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"\n[Chart Saved] Performance plot written to: {output_file}")
 
 
 def run_kraken_live_stream(
@@ -646,6 +790,17 @@ def main():
         default="examples/data",
         help="Directory containing Kraken Parquet files (default: examples/data)",
     )
+    parser.add_argument(
+        "--plot-file",
+        type=str,
+        default="examples/kraken_pnl_chart.png",
+        help="Path to save performance PnL chart PNG (default: examples/kraken_pnl_chart.png)",
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Disable automatic PnL chart generation after backtest",
+    )
     args = parser.parse_args()
 
     client = KrakenClient()
@@ -695,7 +850,7 @@ def main():
     print("=" * 75)
 
     # 1. Run OBI Strategy on real Kraken flow
-    obi_trades, obi_pnl, obi_dd = run_single_kraken_backtest(
+    obi_trades, obi_pnl, obi_dd, obi_history = run_single_kraken_backtest(
         session=session,
         mode="OBI",
         symbol="ETH-USDT",
@@ -706,7 +861,7 @@ def main():
 
     # 2. Run Random Baseline on exact same real Kraken flow
     print("\n--- Running Random-Entry Same-Exit Baseline on Kraken Market Flow ---")
-    rand_trades, rand_pnl, rand_dd = run_single_kraken_backtest(
+    rand_trades, rand_pnl, rand_dd, rand_history = run_single_kraken_backtest(
         session=session,
         mode="RANDOM",
         symbol="ETH-USDT",
@@ -727,6 +882,15 @@ def main():
         f"Max DD = ${rand_dd:>6.2f} | Trades = {rand_trades}"
     )
     print("=" * 75)
+
+    # 4. Plot PnL curves over time
+    if not args.no_plot:
+        plot_pnl_over_time(
+            obi_history=obi_history,
+            rand_history=rand_history,
+            symbol=args.pair,
+            output_file=args.plot_file,
+        )
 
 
 if __name__ == "__main__":

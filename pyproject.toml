@@ -16,6 +16,7 @@ dev = [
     "ruff>=0.5.0",
     "maturin>=1.5.0",
     "pyarrow>=15.0.0",
+    "matplotlib>=3.8.0",
 ]
 
 [tool.maturin]
@@ -38,4 +39,5 @@ python_files = ["test_*.py"]
 [dependency-groups]
 dev = [
     "pyarrow>=25.0.1",
+    "matplotlib>=3.8.0",
 ]

@@ -761,8 +761,8 @@ def main():
     parser.add_argument(
         "--pair",
         type=str,
-        default="ETHUSD",
-        help="Kraken trading pair (default: ETHUSD)",
+        default="ETH/USD",
+        help="Kraken trading pair (default: ETH/USD)",
     )
     parser.add_argument(
         "--poll-interval",
@@ -824,7 +824,7 @@ def main():
         return
 
     # Backtest Mode (Parquet Replay with Full L2 Depth & Deltas)
-    pair_clean = args.pair.lower().replace("/", "")
+    pair_clean = args.pair.lower().replace("/", "").replace("-", "").replace("_", "")
     depth_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_depth.parquet")
     trades_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_trades.parquet")
     deltas_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_deltas.parquet")

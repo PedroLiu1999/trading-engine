@@ -351,6 +351,21 @@ class KrakenClient:
         return cls.load_from_json(path)
 
 
+def normalize_kraken_ws_pair(pair: str) -> str:
+    """Normalizes symbol to Kraken WebSocket API v2 format with slash, e.g. ETH/USD."""
+    p = pair.upper().strip()
+    if "/" in p:
+        return p
+    if "-" in p:
+        return p.replace("-", "/")
+    if "_" in p:
+        return p.replace("_", "/")
+    for quote in ("USDT", "USDC", "USD", "EUR", "GBP", "JPY", "CAD", "CHF", "AUD", "BTC", "ETH"):
+        if p.endswith(quote) and len(p) > len(quote):
+            return f"{p[: -len(quote)]}/{quote}"
+    return p
+
+
 class KrakenWebSocketRecorder:
     """Streams and records authentic live Level 2 order book snapshots, deltas,
     and market trades from Kraken WebSocket API v2 directly to Apache Parquet.
@@ -359,7 +374,7 @@ class KrakenWebSocketRecorder:
     WS_URL = "wss://ws.kraken.com/v2"
 
     def __init__(self, pair: str = "ETH/USD", depth: int = 100):
-        self.pair = pair.replace("-", "/").upper()
+        self.pair = normalize_kraken_ws_pair(pair)
         self.depth = depth
 
     async def record_stream(
@@ -381,6 +396,7 @@ class KrakenWebSocketRecorder:
         trades: list[KrakenTrade] = []
         captured_at = time.time()
         update_count = 0
+        last_progress_print = 0
         start_time = time.time()
 
         print(f"Connecting to Kraken WebSocket API v2 ({self.WS_URL})...")
@@ -418,6 +434,12 @@ class KrakenWebSocketRecorder:
                     continue
 
                 msg = json.loads(raw_msg)
+                if msg.get("method") == "subscribe":
+                    if not msg.get("success", True):
+                        err = msg.get("error", "Unknown error")
+                        print(f"\n[Kraken WS Error] Subscription rejected: {err}")
+                    continue
+
                 channel = msg.get("channel")
                 msg_type = msg.get("type")
                 data_list = msg.get("data", [])
@@ -428,6 +450,10 @@ class KrakenWebSocketRecorder:
                         bids = [(float(b["price"]), float(b["qty"])) for b in snap.get("bids", [])]
                         asks = [(float(a["price"]), float(a["qty"])) for a in snap.get("asks", [])]
                         captured_at = time.time()
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] Snapshot received: "
+                            f"{len(bids)} bids, {len(asks)} asks."
+                        )
                     elif msg_type == "update" and data_list:
                         upd = data_list[0]
                         ts = time.time()
@@ -468,6 +494,25 @@ class KrakenWebSocketRecorder:
                         )
                         update_count += 1
 
+                if update_count - last_progress_print >= 15:
+                    last_progress_print = update_count
+                    elapsed = now - start_time
+                    rem = max(0.0, (duration_seconds - elapsed)) if duration_seconds else 0.0
+                    print(
+                        f"\r[{time.strftime('%H:%M:%S')}] Streaming L2 flow: "
+                        f"{len(deltas):,} deltas, {len(trades):,} trades "
+                        f"({rem:.0f}s remaining)...",
+                        end="",
+                        flush=True,
+                    )
+
+        if not bids and not asks:
+            raise RuntimeError(
+                f"Failed to record order book data for {self.pair}. "
+                "Check that the trading pair is supported on Kraken WebSocket v2."
+            )
+
+        print()  # Clear line from carriage return progress
         session = KrakenMarketSession(
             pair=self.pair,
             captured_at=captured_at,
@@ -478,7 +523,7 @@ class KrakenWebSocketRecorder:
         )
 
         os.makedirs(output_dir, exist_ok=True)
-        pair_clean = self.pair.lower().replace("/", "")
+        pair_clean = self.pair.lower().replace("/", "").replace("-", "")
         depth_pq = os.path.join(output_dir, f"kraken_{pair_clean}_depth.parquet")
         trades_pq = os.path.join(output_dir, f"kraken_{pair_clean}_trades.parquet")
         deltas_pq = os.path.join(output_dir, f"kraken_{pair_clean}_deltas.parquet")

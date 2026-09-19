@@ -205,8 +205,13 @@ def run_single_kraken_backtest(
 
         # Quoting Decisions
         if not in_position:
-            # Flat: look for new entry quote. (If partially filled, keep resting order alive)
-            if abs(curr_qty) < 0.001:
+            rem_entry_qty = max(0.001, ORDER_QTY - abs(curr_qty))
+            if resting_order_id is None and abs(curr_qty) >= 0.001:
+                in_position = True
+                entry_trade_idx = trade_idx
+                trades_executed += 1
+
+            if not in_position:
                 if not is_random:
                     desired_side = None
                     desired_price = 0.0
@@ -230,15 +235,19 @@ def run_single_kraken_backtest(
                                 except Exception:
                                     pass
                                 resting_order_id = None
+                                if abs(curr_qty) >= 0.001:
+                                    in_position = True
+                                    entry_trade_idx = trade_idx
+                                    trades_executed += 1
 
-                        if resting_order_id is None:
+                        if resting_order_id is None and not in_position:
                             try:
                                 order = engine.submit_order(
                                     symbol=symbol,
                                     side=desired_side,
                                     order_type="LIMIT",
                                     price=desired_price,
-                                    quantity=ORDER_QTY,
+                                    quantity=rem_entry_qty,
                                     time_in_force="GTC",
                                     account_id=strat_account,
                                 )
@@ -252,6 +261,10 @@ def run_single_kraken_backtest(
                             except Exception:
                                 pass
                             resting_order_id = None
+                            if abs(curr_qty) >= 0.001:
+                                in_position = True
+                                entry_trade_idx = trade_idx
+                                trades_executed += 1
                 else:
                     # Random baseline entry
                     if random_desired_side is None:
@@ -624,7 +637,7 @@ async def _async_run_kraken_live_stream(
                     resting_order_id = None
                 print(
                     f"[{time.strftime('%H:%M:%S')}] >>> STRATEGY FILLED ENTRY: "
-                    f"{curr_qty:+.2f} ETH @ ${avg_entry:.2f}"
+                    f"{curr_qty:+.3f} ETH @ ${avg_entry:.2f}"
                 )
         else:
             if abs(curr_qty) < 0.001:
@@ -648,7 +661,18 @@ async def _async_run_kraken_live_stream(
                 resting_order_id = None
 
         if not in_position:
-            if abs(curr_qty) < 0.001:
+            rem_entry_qty = max(0.001, ORDER_QTY - abs(curr_qty))
+            if resting_order_id is None and abs(curr_qty) >= 0.001:
+                in_position = True
+                entry_trade_idx = trades_processed
+                strategy_entries += 1
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] >>> "
+                    f"PARTIAL ENTRY ACTIVE: {curr_qty:+.3f} ETH @ "
+                    f"${avg_entry:.2f} (Switching to Exit)"
+                )
+
+            if not in_position:
                 desired_side = None
                 desired_price = 0.0
                 if wobi >= WOBI_ENTRY_THRESH and metrics["best_bid"] > 0:
@@ -671,22 +695,31 @@ async def _async_run_kraken_live_stream(
                             except Exception:
                                 pass
                             resting_order_id = None
+                            if abs(curr_qty) >= 0.001:
+                                in_position = True
+                                entry_trade_idx = trades_processed
+                                strategy_entries += 1
+                                print(
+                                    f"[{time.strftime('%H:%M:%S')}] >>> "
+                                    f"PARTIAL ENTRY ACTIVE: {curr_qty:+.3f} ETH @ "
+                                    f"${avg_entry:.2f} (Switching to Exit)"
+                                )
 
-                    if resting_order_id is None:
+                    if resting_order_id is None and not in_position:
                         try:
                             order = engine.submit_order(
                                 symbol=symbol,
                                 side=desired_side,
                                 order_type="LIMIT",
                                 price=desired_price,
-                                quantity=ORDER_QTY,
+                                quantity=rem_entry_qty,
                                 time_in_force="GTC",
                                 account_id=strat_account,
                             )
                             resting_order_id = order.id
                             print(
                                 f"[{time.strftime('%H:%M:%S')}] [Order Placed] "
-                                f"LIMIT {desired_side:<4} {ORDER_QTY:.2f} ETH @ "
+                                f"LIMIT {desired_side:<4} {rem_entry_qty:.3f} ETH @ "
                                 f"${desired_price:.2f} | WOBI: {wobi:>+5.2f}"
                             )
                         except Exception:
@@ -704,6 +737,15 @@ async def _async_run_kraken_live_stream(
                     except Exception:
                         pass
                     resting_order_id = None
+                    if abs(curr_qty) >= 0.001:
+                        in_position = True
+                        entry_trade_idx = trades_processed
+                        strategy_entries += 1
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] >>> "
+                            f"PARTIAL ENTRY ACTIVE: {curr_qty:+.3f} ETH @ "
+                            f"${avg_entry:.2f} (Switching to Exit)"
+                        )
         else:
             # In position: passive exit or emergency stop
             hold_trades = trades_processed - entry_trade_idx
@@ -726,7 +768,7 @@ async def _async_run_kraken_live_stream(
                     reason = "Stop-Loss" if pnl_pts <= -STOP_LOSS_PTS else "Max-Hold"
                     print(
                         f"[{time.strftime('%H:%M:%S')}] [EMERGENCY EXIT] "
-                        f"MARKET {exit_side} {abs(curr_qty):.2f} ETH "
+                        f"MARKET {exit_side} {abs(curr_qty):.3f} ETH "
                         f"({reason}: PnL={pnl_pts:+.2f})"
                     )
                     engine.submit_order(
@@ -772,7 +814,7 @@ async def _async_run_kraken_live_stream(
                         resting_order_id = order.id
                         print(
                             f"[{time.strftime('%H:%M:%S')}] [Exit Placed] "
-                            f"LIMIT {exit_side:<4} {abs(curr_qty):.2f} ETH @ "
+                            f"LIMIT {exit_side:<4} {abs(curr_qty):.3f} ETH @ "
                             f"${exit_price:.2f} (Targeting Spread)"
                         )
                     except Exception:
@@ -794,7 +836,7 @@ async def _async_run_kraken_live_stream(
                     f"[{time.strftime('%H:%M:%S')}] Live Heartbeat | "
                     f"Mid: ${m['mid_price']:>7.2f} | WOBI: {m['wobi']:>+5.2f} | "
                     f"Bid: ${m['best_bid']:>7.2f} | Ask: ${m['best_ask']:>7.2f} | "
-                    f"Pos: {q:>+4.1f} | PnL: ${pnl:>+6.2f} | "
+                    f"Pos: {q:>+6.3f} | PnL: ${pnl:>+6.2f} | "
                     f"Deltas: {deltas_processed:,} | Trades: {trades_processed:,}"
                 )
 
@@ -975,7 +1017,7 @@ async def _async_run_kraken_live_stream(
                         print(
                             f"[{time.strftime('%H:%M:%S')}] Trade: {t_side:<4} "
                             f"{t_qty:>6.3f} @ ${t_price:>7.2f} | "
-                            f"Pos: {curr_qty:>+4.1f} | PnL: ${pnl:>+6.2f}"
+                            f"Pos: {curr_qty:>+6.3f} | PnL: ${pnl:>+6.2f}"
                         )
                         check_heartbeat(force=False)
 

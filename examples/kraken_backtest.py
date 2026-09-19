@@ -684,11 +684,23 @@ async def _async_run_kraken_live_stream(
                                 account_id=strat_account,
                             )
                             resting_order_id = order.id
+                            print(
+                                f"[{time.strftime('%H:%M:%S')}] [Order Placed] "
+                                f"LIMIT {desired_side:<4} {ORDER_QTY:.2f} ETH @ "
+                                f"${desired_price:.2f} | WOBI: {wobi:>+5.2f}"
+                            )
                         except Exception:
                             pass
                 elif resting_order_id is not None:
                     try:
+                        curr_order = engine.get_order(symbol, resting_order_id)
                         engine.cancel_order(symbol, resting_order_id)
+                        if curr_order is not None:
+                            print(
+                                f"[{time.strftime('%H:%M:%S')}] [Order Pulled] "
+                                f"Cancel {curr_order.side} @ ${curr_order.price:.2f} "
+                                f"(WOBI neutral: {wobi:>+5.2f})"
+                            )
                     except Exception:
                         pass
                     resting_order_id = None
@@ -711,6 +723,12 @@ async def _async_run_kraken_live_stream(
                     resting_order_id = None
                 exit_side = "SELL" if curr_qty > 0 else "BUY"
                 try:
+                    reason = "Stop-Loss" if pnl_pts <= -STOP_LOSS_PTS else "Max-Hold"
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] [EMERGENCY EXIT] "
+                        f"MARKET {exit_side} {abs(curr_qty):.2f} ETH "
+                        f"({reason}: PnL={pnl_pts:+.2f})"
+                    )
                     engine.submit_order(
                         symbol=symbol,
                         side=exit_side,
@@ -751,6 +769,11 @@ async def _async_run_kraken_live_stream(
                             account_id=strat_account,
                         )
                         resting_order_id = order.id
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] [Exit Placed] "
+                            f"LIMIT {exit_side:<4} {abs(curr_qty):.2f} ETH @ "
+                            f"${exit_price:.2f} (Targeting Spread)"
+                        )
                     except Exception:
                         pass
 
@@ -930,6 +953,12 @@ async def _async_run_kraken_live_stream(
                                                 fill_price=order.price,
                                                 fill_quantity=fill_qty,
                                                 taker_account_id=taker_account,
+                                            )
+                                            rem = max(0.0, order.remaining_quantity - fill_qty)
+                                            print(
+                                                f"[{time.strftime('%H:%M:%S')}] [Fill Matched] "
+                                                f"{order_side} {fill_qty:.3f} ETH @ "
+                                                f"${order.price:.2f} (Rem: {rem:.3f} ETH)"
                                             )
                                         except Exception:
                                             pass

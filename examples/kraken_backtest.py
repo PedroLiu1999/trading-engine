@@ -12,6 +12,7 @@ import json
 import os
 import random
 import time
+from collections import deque
 from pathlib import Path
 
 from trading_engine import (
@@ -113,6 +114,12 @@ def run_single_kraken_backtest(
     ORDER_QTY = 1.0  # 1.0 ETH per quote
     MAX_HOLD_TRADES = 20  # Exit if held across 20 trades without profit target fill
     STOP_LOSS_PTS = 2.00  # $2.00 stop loss
+    MIN_PROFIT_PTS = 0.02  # $0.02 profit floor on passive exit
+    FLOW_THRESH = 0.15  # Minimum net taker volume imbalance to filter adverse flow
+    MOMENTUM_THRESH = 0.03  # Max price slippage against entry direction
+
+    recent_trade_flow: deque[float] = deque(maxlen=15)
+    recent_mid_prices: deque[float] = deque(maxlen=20)
 
     resting_order_id = None
     in_position = False
@@ -133,6 +140,10 @@ def run_single_kraken_backtest(
     for trade_idx in range(trade_limit):
         trade = session.trades[trade_idx]
 
+        # Record trade flow
+        flow_sign = 1.0 if trade.side.upper() == "BUY" else -1.0
+        recent_trade_flow.append(flow_sign * trade.quantity)
+
         # 1. Apply any real-time book deltas strictly BEFORE this trade (strict < and seq tie-break)
         replayer.apply_deltas_until(trade.timestamp, trade.seq)
 
@@ -146,6 +157,11 @@ def run_single_kraken_backtest(
 
         metrics = compute_order_book_metrics(depth, max_levels=4)
         wobi = metrics["wobi"]
+        recent_mid_prices.append(metrics["mid_price"])
+        net_flow = sum(recent_trade_flow)
+        mid_momentum = (
+            (metrics["mid_price"] - recent_mid_prices[0]) if len(recent_mid_prices) >= 5 else 0.0
+        )
 
         pos = engine.get_position(symbol, account_id=strat_account)
         curr_qty = pos.quantity if pos else 0.0
@@ -216,11 +232,13 @@ def run_single_kraken_backtest(
                     desired_side = None
                     desired_price = 0.0
                     if wobi >= WOBI_ENTRY_THRESH and metrics["best_bid"] > 0:
-                        desired_side = "BUY"
-                        desired_price = metrics["best_bid"]
+                        if net_flow >= -FLOW_THRESH and mid_momentum >= -MOMENTUM_THRESH:
+                            desired_side = "BUY"
+                            desired_price = metrics["best_bid"]
                     elif wobi <= -WOBI_ENTRY_THRESH and metrics["best_ask"] > 0:
-                        desired_side = "SELL"
-                        desired_price = metrics["best_ask"]
+                        if net_flow <= FLOW_THRESH and mid_momentum <= MOMENTUM_THRESH:
+                            desired_side = "SELL"
+                            desired_price = metrics["best_ask"]
 
                     if desired_side:
                         if resting_order_id is not None:
@@ -340,8 +358,14 @@ def run_single_kraken_backtest(
                 except Exception:
                     pass
             else:
-                exit_price = metrics["best_ask"] if curr_qty > 0 else metrics["best_bid"]
-                exit_side = "SELL" if curr_qty > 0 else "BUY"
+                if curr_qty > 0:
+                    target_price = avg_entry + MIN_PROFIT_PTS
+                    exit_price = max(target_price, metrics["best_ask"])
+                    exit_side = "SELL"
+                else:
+                    target_price = avg_entry - MIN_PROFIT_PTS
+                    exit_price = min(target_price, metrics["best_bid"])
+                    exit_side = "BUY"
 
                 if resting_order_id is not None:
                     curr_order = engine.get_order(symbol, resting_order_id)
@@ -590,6 +614,12 @@ async def _async_run_kraken_live_stream(
     WOBI_ENTRY_THRESH = 0.15
     STOP_LOSS_PTS = 2.00
     MAX_HOLD_TRADES = 30
+    MIN_PROFIT_PTS = 0.02
+    FLOW_THRESH = 0.15
+    MOMENTUM_THRESH = 0.03
+
+    recent_trade_flow: deque[float] = deque(maxlen=20)
+    recent_mid_prices: deque[float] = deque(maxlen=20)
 
     maker_orders: dict[tuple[str, float], int] = {}
     resting_order_id: int | None = None
@@ -611,6 +641,11 @@ async def _async_run_kraken_live_stream(
             return
         metrics = compute_order_book_metrics(cur_depth, max_levels=4)
         wobi = metrics["wobi"]
+        recent_mid_prices.append(metrics["mid_price"])
+        net_flow = sum(recent_trade_flow)
+        mid_momentum = (
+            (metrics["mid_price"] - recent_mid_prices[0]) if len(recent_mid_prices) >= 5 else 0.0
+        )
 
         pos = engine.get_position(symbol, account_id=strat_account)
         curr_qty = pos.quantity if pos else 0.0
@@ -676,11 +711,13 @@ async def _async_run_kraken_live_stream(
                 desired_side = None
                 desired_price = 0.0
                 if wobi >= WOBI_ENTRY_THRESH and metrics["best_bid"] > 0:
-                    desired_side = "BUY"
-                    desired_price = metrics["best_bid"]
+                    if net_flow >= -FLOW_THRESH and mid_momentum >= -MOMENTUM_THRESH:
+                        desired_side = "BUY"
+                        desired_price = metrics["best_bid"]
                 elif wobi <= -WOBI_ENTRY_THRESH and metrics["best_ask"] > 0:
-                    desired_side = "SELL"
-                    desired_price = metrics["best_ask"]
+                    if net_flow <= FLOW_THRESH and mid_momentum <= MOMENTUM_THRESH:
+                        desired_side = "SELL"
+                        desired_price = metrics["best_ask"]
 
                 if desired_side:
                     if resting_order_id is not None:
@@ -783,8 +820,14 @@ async def _async_run_kraken_live_stream(
                 except Exception:
                     pass
             else:
-                exit_price = metrics["best_ask"] if curr_qty > 0 else metrics["best_bid"]
-                exit_side = "SELL" if curr_qty > 0 else "BUY"
+                if curr_qty > 0:
+                    target_price = avg_entry + MIN_PROFIT_PTS
+                    exit_price = max(target_price, metrics["best_ask"])
+                    exit_side = "SELL"
+                else:
+                    target_price = avg_entry - MIN_PROFIT_PTS
+                    exit_price = min(target_price, metrics["best_bid"])
+                    exit_side = "BUY"
 
                 if resting_order_id is not None:
                     curr_order = engine.get_order(symbol, resting_order_id)
@@ -815,7 +858,7 @@ async def _async_run_kraken_live_stream(
                         print(
                             f"[{time.strftime('%H:%M:%S')}] [Exit Placed] "
                             f"LIMIT {exit_side:<4} {abs(curr_qty):.3f} ETH @ "
-                            f"${exit_price:.2f} (Targeting Spread)"
+                            f"${exit_price:.2f} (Targeting Profit: ${target_price:.2f})"
                         )
                     except Exception:
                         pass
@@ -966,6 +1009,8 @@ async def _async_run_kraken_live_stream(
                         t_price = float(t["price"])
                         t_qty = float(t["qty"])
                         t_side = "BUY" if t.get("side", "").lower() == "buy" else "SELL"
+                        flow_sign = 1.0 if t_side == "BUY" else -1.0
+                        recent_trade_flow.append(flow_sign * t_qty)
 
                         # Try fill resting order from the trade without touching KRAKEN_MAKER
                         if resting_order_id is not None:

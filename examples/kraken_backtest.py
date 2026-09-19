@@ -366,7 +366,7 @@ def plot_pnl_over_time(
     obi_history: list[dict[str, float]],
     rand_history: list[dict[str, float]],
     symbol: str = "ETHUSD",
-    output_file: str = "examples/kraken_pnl_chart.png",
+    output_file: str = "examples/charts/kraken_pnl_chart.png",
 ) -> None:
     """Generates a high-resolution dark-themed performance chart comparing OBI vs Random."""
     try:
@@ -793,8 +793,8 @@ def main():
     parser.add_argument(
         "--plot-file",
         type=str,
-        default="examples/kraken_pnl_chart.png",
-        help="Path to save performance PnL chart PNG (default: examples/kraken_pnl_chart.png)",
+        default="examples/charts/kraken_pnl_chart.png",
+        help="Path to save performance PnL chart PNG (default: examples/charts/...)",
     )
     parser.add_argument(
         "--no-plot",

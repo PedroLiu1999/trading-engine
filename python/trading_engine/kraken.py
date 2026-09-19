@@ -382,108 +382,196 @@ class KrakenWebSocketRecorder:
         duration_seconds: float = 60.0,
         max_updates: int | None = None,
         output_dir: str = "examples/data",
+        flush_interval_records: int = 250,
     ) -> KrakenMarketSession:
-        """Connects to Kraken WebSocket v2, records L2 book deltas and trades,
-        and saves the session to Parquet.
+        """Connects to Kraken WebSocket v2, streams L2 book deltas and trades directly
+        to compressed Parquet on disk with incremental chunk flushes and Ctrl+C safety.
         """
         import asyncio
 
         import websockets
 
+        if not HAS_PYARROW:
+            raise ImportError("pyarrow is required for Parquet export. Run `uv add pyarrow`.")
+
+        os.makedirs(output_dir, exist_ok=True)
+        pair_clean = self.pair.lower().replace("/", "").replace("-", "")
+        depth_pq = os.path.join(output_dir, f"kraken_{pair_clean}_depth.parquet")
+        trades_pq = os.path.join(output_dir, f"kraken_{pair_clean}_trades.parquet")
+        deltas_pq = os.path.join(output_dir, f"kraken_{pair_clean}_deltas.parquet")
+
+        delta_schema = pa.schema(
+            [
+                ("timestamp", pa.float64()),
+                ("side", pa.string()),
+                ("price", pa.float64()),
+                ("quantity", pa.float64()),
+            ]
+        )
+        trade_schema = pa.schema(
+            [
+                ("price", pa.float64()),
+                ("quantity", pa.float64()),
+                ("timestamp", pa.float64()),
+                ("side", pa.string()),
+                ("order_type", pa.string()),
+                ("trade_id", pa.int64()),
+            ]
+        )
+
+        delta_writer = pq.ParquetWriter(deltas_pq, delta_schema, compression="snappy")
+        trade_writer = pq.ParquetWriter(trades_pq, trade_schema, compression="snappy")
+
         bids: list[tuple[float, float]] = []
         asks: list[tuple[float, float]] = []
         deltas: list[KrakenBookDelta] = []
         trades: list[KrakenTrade] = []
+        delta_buffer: list[KrakenBookDelta] = []
+        trade_buffer: list[KrakenTrade] = []
+
         captured_at = time.time()
         update_count = 0
         last_progress_print = 0
+        last_flush_time = time.time()
         start_time = time.time()
 
+        def flush_buffers() -> None:
+            nonlocal delta_buffer, trade_buffer, last_flush_time
+            if delta_buffer:
+                d_table = pa.Table.from_arrays(
+                    [
+                        pa.array([d.timestamp for d in delta_buffer], type=pa.float64()),
+                        pa.array([d.side for d in delta_buffer], type=pa.string()),
+                        pa.array([d.price for d in delta_buffer], type=pa.float64()),
+                        pa.array([d.quantity for d in delta_buffer], type=pa.float64()),
+                    ],
+                    schema=delta_schema,
+                )
+                delta_writer.write_table(d_table)
+                delta_buffer.clear()
+
+            if trade_buffer:
+                t_table = pa.Table.from_arrays(
+                    [
+                        pa.array([t.price for t in trade_buffer], type=pa.float64()),
+                        pa.array([t.quantity for t in trade_buffer], type=pa.float64()),
+                        pa.array([t.timestamp for t in trade_buffer], type=pa.float64()),
+                        pa.array([t.side for t in trade_buffer], type=pa.string()),
+                        pa.array([t.order_type for t in trade_buffer], type=pa.string()),
+                        pa.array([t.trade_id for t in trade_buffer], type=pa.int64()),
+                    ],
+                    schema=trade_schema,
+                )
+                trade_writer.write_table(t_table)
+                trade_buffer.clear()
+            last_flush_time = time.time()
+
         print(f"Connecting to Kraken WebSocket API v2 ({self.WS_URL})...")
-        async with websockets.connect(self.WS_URL, ping_interval=20, ping_timeout=10) as ws:
-            book_sub = {
-                "method": "subscribe",
-                "params": {
-                    "channel": "book",
-                    "symbol": [self.pair],
-                    "depth": self.depth,
-                },
-            }
-            await ws.send(json.dumps(book_sub))
+        try:
+            async with websockets.connect(self.WS_URL, ping_interval=20, ping_timeout=10) as ws:
+                book_sub = {
+                    "method": "subscribe",
+                    "params": {
+                        "channel": "book",
+                        "symbol": [self.pair],
+                        "depth": self.depth,
+                    },
+                }
+                await ws.send(json.dumps(book_sub))
 
-            trade_sub = {
-                "method": "subscribe",
-                "params": {
-                    "channel": "trade",
-                    "symbol": [self.pair],
-                },
-            }
-            await ws.send(json.dumps(trade_sub))
-            print(f"Subscribed to book (depth={self.depth}) and trade channels for {self.pair}...")
+                trade_sub = {
+                    "method": "subscribe",
+                    "params": {
+                        "channel": "trade",
+                        "symbol": [self.pair],
+                    },
+                }
+                await ws.send(json.dumps(trade_sub))
+                print(
+                    f"Subscribed to book (depth={self.depth}) and trade channels for {self.pair}..."
+                )
 
-            while True:
-                now = time.time()
-                if duration_seconds is not None and (now - start_time) >= duration_seconds:
-                    break
-                if max_updates is not None and update_count >= max_updates:
-                    break
+                while True:
+                    now = time.time()
+                    if duration_seconds is not None and (now - start_time) >= duration_seconds:
+                        break
+                    if max_updates is not None and update_count >= max_updates:
+                        break
 
-                try:
-                    raw_msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                except TimeoutError:
-                    continue
+                    try:
+                        raw_msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                    except TimeoutError:
+                        continue
 
-                msg = json.loads(raw_msg)
-                if msg.get("method") == "subscribe":
-                    if not msg.get("success", True):
-                        err = msg.get("error", "Unknown error")
-                        print(f"\n[Kraken WS Error] Subscription rejected: {err}")
-                    continue
+                    msg = json.loads(raw_msg)
+                    if msg.get("method") == "subscribe":
+                        if not msg.get("success", True):
+                            err = msg.get("error", "Unknown error")
+                            print(f"\n[Kraken WS Error] Subscription rejected: {err}")
+                        continue
 
-                channel = msg.get("channel")
-                msg_type = msg.get("type")
-                data_list = msg.get("data", [])
+                    channel = msg.get("channel")
+                    msg_type = msg.get("type")
+                    data_list = msg.get("data", [])
 
-                if channel == "book":
-                    if msg_type == "snapshot" and data_list:
-                        snap = data_list[0]
-                        bids = [(float(b["price"]), float(b["qty"])) for b in snap.get("bids", [])]
-                        asks = [(float(a["price"]), float(a["qty"])) for a in snap.get("asks", [])]
-                        captured_at = time.time()
-                        print(
-                            f"[{time.strftime('%H:%M:%S')}] Snapshot received: "
-                            f"{len(bids)} bids, {len(asks)} asks."
-                        )
-                    elif msg_type == "update" and data_list:
-                        upd = data_list[0]
-                        ts = time.time()
-                        for b in upd.get("bids", []):
-                            deltas.append(
-                                KrakenBookDelta(
+                    if channel == "book":
+                        if msg_type == "snapshot" and data_list:
+                            snap = data_list[0]
+                            bids = [
+                                (float(b["price"]), float(b["qty"])) for b in snap.get("bids", [])
+                            ]
+                            asks = [
+                                (float(a["price"]), float(a["qty"])) for a in snap.get("asks", [])
+                            ]
+                            captured_at = time.time()
+
+                            # Immediately write initial depth table to Parquet
+                            depth_sides = ["bid"] * len(bids) + ["ask"] * len(asks)
+                            depth_prices = [p for p, _ in bids] + [p for p, _ in asks]
+                            depth_qtys = [q for _, q in bids] + [q for _, q in asks]
+                            depth_table = pa.Table.from_arrays(
+                                [
+                                    pa.array(depth_sides, type=pa.string()),
+                                    pa.array(depth_prices, type=pa.float64()),
+                                    pa.array(depth_qtys, type=pa.float64()),
+                                ],
+                                names=["side", "price", "quantity"],
+                            )
+                            pq.write_table(depth_table, depth_pq, compression="snappy")
+
+                            print(
+                                f"[{time.strftime('%H:%M:%S')}] Snapshot received and flushed to "
+                                f"disk ({len(bids)} bids, {len(asks)} asks)."
+                            )
+                        elif msg_type == "update" and data_list:
+                            upd = data_list[0]
+                            ts = time.time()
+                            for b in upd.get("bids", []):
+                                delta = KrakenBookDelta(
                                     timestamp=ts,
                                     side="BUY",
                                     price=float(b["price"]),
                                     quantity=float(b["qty"]),
                                 )
-                            )
-                            update_count += 1
-                        for a in upd.get("asks", []):
-                            deltas.append(
-                                KrakenBookDelta(
+                                deltas.append(delta)
+                                delta_buffer.append(delta)
+                                update_count += 1
+                            for a in upd.get("asks", []):
+                                delta = KrakenBookDelta(
                                     timestamp=ts,
                                     side="SELL",
                                     price=float(a["price"]),
                                     quantity=float(a["qty"]),
                                 )
-                            )
-                            update_count += 1
+                                deltas.append(delta)
+                                delta_buffer.append(delta)
+                                update_count += 1
 
-                elif channel == "trade" and data_list:
-                    for t in data_list:
-                        ts = time.time()
-                        side = "BUY" if t.get("side", "").lower() == "buy" else "SELL"
-                        trades.append(
-                            KrakenTrade(
+                    elif channel == "trade" and data_list:
+                        for t in data_list:
+                            ts = time.time()
+                            side = "BUY" if t.get("side", "").lower() == "buy" else "SELL"
+                            trade = KrakenTrade(
                                 price=float(t["price"]),
                                 quantity=float(t["qty"]),
                                 timestamp=ts,
@@ -491,20 +579,36 @@ class KrakenWebSocketRecorder:
                                 order_type="MARKET",
                                 trade_id=int(t.get("trade_id", 0)),
                             )
-                        )
-                        update_count += 1
+                            trades.append(trade)
+                            trade_buffer.append(trade)
+                            update_count += 1
 
-                if update_count - last_progress_print >= 15:
-                    last_progress_print = update_count
-                    elapsed = now - start_time
-                    rem = max(0.0, (duration_seconds - elapsed)) if duration_seconds else 0.0
-                    print(
-                        f"\r[{time.strftime('%H:%M:%S')}] Streaming L2 flow: "
-                        f"{len(deltas):,} deltas, {len(trades):,} trades "
-                        f"({rem:.0f}s remaining)...",
-                        end="",
-                        flush=True,
-                    )
+                    # Incremental streaming flush to disk
+                    if (
+                        len(delta_buffer) >= flush_interval_records
+                        or len(trade_buffer) >= 50
+                        or (now - last_flush_time) >= 5.0
+                    ):
+                        flush_buffers()
+
+                    if update_count - last_progress_print >= 15:
+                        last_progress_print = update_count
+                        elapsed = now - start_time
+                        rem = max(0.0, (duration_seconds - elapsed)) if duration_seconds else 0.0
+                        print(
+                            f"\r[{time.strftime('%H:%M:%S')}] Streaming L2 flow: "
+                            f"{len(deltas):,} deltas, {len(trades):,} trades "
+                            f"({rem:.0f}s remaining)...",
+                            end="",
+                            flush=True,
+                        )
+
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\n[Kraken WS] Interrupted by user (Ctrl+C). Finalizing recorded session...")
+        finally:
+            flush_buffers()
+            delta_writer.close()
+            trade_writer.close()
 
         if not bids and not asks:
             raise RuntimeError(
@@ -522,15 +626,8 @@ class KrakenWebSocketRecorder:
             deltas=deltas,
         )
 
-        os.makedirs(output_dir, exist_ok=True)
-        pair_clean = self.pair.lower().replace("/", "").replace("-", "")
-        depth_pq = os.path.join(output_dir, f"kraken_{pair_clean}_depth.parquet")
-        trades_pq = os.path.join(output_dir, f"kraken_{pair_clean}_trades.parquet")
-        deltas_pq = os.path.join(output_dir, f"kraken_{pair_clean}_deltas.parquet")
-
-        KrakenClient.save_to_parquet(session, depth_pq, trades_pq, deltas_file=deltas_pq)
         print(
-            f"Saved WebSocket session to Parquet ({len(bids)} bids, {len(asks)} asks, "
+            f"Flushed session to Parquet ({len(bids)} bids, {len(asks)} asks, "
             f"{len(deltas)} deltas, {len(trades)} trades) in {output_dir}"
         )
         return session
@@ -541,10 +638,25 @@ class KrakenWebSocketRecorder:
         max_updates: int | None = None,
         output_dir: str = "examples/data",
     ) -> KrakenMarketSession:
-        """Synchronous wrapper for record_stream."""
+        """Synchronous wrapper with graceful Ctrl+C interruption support."""
         import asyncio
 
-        return asyncio.run(self.record_stream(duration_seconds, max_updates, output_dir))
+        try:
+            return asyncio.run(self.record_stream(duration_seconds, max_updates, output_dir))
+        except KeyboardInterrupt:
+            pair_clean = self.pair.lower().replace("/", "").replace("-", "")
+            depth_pq = os.path.join(output_dir, f"kraken_{pair_clean}_depth.parquet")
+            trades_pq = os.path.join(output_dir, f"kraken_{pair_clean}_trades.parquet")
+            deltas_pq = os.path.join(output_dir, f"kraken_{pair_clean}_deltas.parquet")
+            if os.path.exists(depth_pq) and os.path.exists(trades_pq):
+                print(f"[Kraken WS] Loading interrupted session from disk ({self.pair})...")
+                return KrakenClient.load_from_parquet(
+                    depth_pq,
+                    trades_pq,
+                    pair=self.pair,
+                    deltas_file=deltas_pq if os.path.exists(deltas_pq) else None,
+                )
+            raise
 
 
 class KrakenOrderBookReplayer:

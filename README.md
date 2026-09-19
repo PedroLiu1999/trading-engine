@@ -211,27 +211,35 @@ uv run pytest tests/
 
 ## Real-Market Kraken Order Book Backtesting
 
-Backtest strategies against authentic exchange order book depth and historical public market taker executions stored in compressed Apache Parquet format:
+Backtest strategies against authentic exchange Level 2 order book depth, tick-by-tick maker book deltas, and real market taker executions stored in compressed Apache Parquet format:
 
 ```bash
-# Run backtest on cached Kraken ETH/USD Parquet dataset (OBI Scalper vs. Random Baseline)
+# 1. Record authentic Kraken L2 snapshots, book deltas, and trades via WebSocket v2 (default: 60s)
+uv run python examples/kraken_backtest.py --record
+
+# Record for a custom duration (e.g. 120 seconds)
+uv run python examples/kraken_backtest.py --record 120
+
+# 2. Run backtest on cached Kraken L2 Parquet dataset (OBI Scalper vs. Random Baseline)
 uv run python examples/kraken_backtest.py
 
-# Download 5,000 (or 10,000) historical market trades from Kraken API and save to Parquet
-uv run python examples/kraken_backtest.py --fetch-history 5000
-
-# Force refresh order book depth snapshot and trade history from Kraken
+# Force re-record a fresh WebSocket L2 session, overwriting cached Parquet
 uv run python examples/kraken_backtest.py --refresh
+
+# Custom plot output path (default: examples/charts/kraken_pnl_chart.png)
+uv run python examples/kraken_backtest.py --plot-file examples/charts/my_pnl_chart.png
 
 # Continuously stream live market trades and execute in real-time until Ctrl+C
 uv run python examples/kraken_backtest.py --live --pair ETHUSD
 ```
 
-Features:
-- **No API Key Required**: Ingests public L2 depth snapshots and trade streams directly from Kraken REST API.
-- **Ultra-Fast Parquet Storage**: Uses Apache Parquet (`pyarrow`) for columnar, compressed, zero-copy tick reading across thousands of market trades.
-- **Realistic Queue Position**: Passive strategy orders join the authentic exchange queue at price levels with price-time priority behind resting market maker liquidity.
-- **True Order-Flow Toxicity**: Real market taker trades walk the book, subjecting passive limit orders to authentic adverse selection and sweep dynamics.
+### Key Capabilities
+- **Full Level 2 Depth & Deltas (`KrakenWebSocketRecorder`)**: Connects to `wss://ws.kraken.com/v2` to capture the true initial order book snapshot alongside all subsequent maker order additions, quote modifications, and cancellations (`KrakenBookDelta`).
+- **Authentic Microstructure Replay (`KrakenOrderBookReplayer`)**: Reconstructs the exact state of the exchange order book prior to each trade execution by synchronizing maker deltas chronologically with `apply_deltas_until(timestamp)`.
+- **Zero-Copy Parquet Storage**: Fast columnar storage (`pyarrow`) splitting depth, deltas, and executions into compressed, reproducible files in `examples/data/`.
+- **Realistic Queue Position**: Passive strategy orders join the authentic exchange queue at price levels with price-time (FIFO) priority behind resting liquidity.
+- **True Order-Flow Toxicity**: Real market taker trades walk the book, subjecting limit orders to adverse selection and sweep dynamics.
+- **Automated Performance Visualizations**: Generates dark-themed high-resolution performance plots in `examples/charts/` comparing strategy vs. random baseline realized PnL, drawdown underwater curves, and price trajectories.
 
 ---
 

@@ -378,6 +378,74 @@ impl OrderBook {
         queue.iter().find(|o| o.id == order_id)
     }
 
+    pub fn fill_order(
+        &mut self,
+        order_id: OrderId,
+        fill_qty: f64,
+        exec_price: f64,
+        taker_account_id: &str,
+        now: i64,
+    ) -> Option<Trade> {
+        let (side, tick) = self.order_map.get(&order_id).copied()?;
+        let queue = match side {
+            Side::Buy => self.bids.get_mut(&tick),
+            Side::Sell => self.asks.get_mut(&tick),
+        }?;
+
+        let mut matched_trade = None;
+        let mut fully_filled = false;
+
+        for maker in queue.iter_mut() {
+            if maker.id == order_id {
+                let match_qty = fill_qty.min(maker.remaining_quantity);
+                if match_qty > 1e-9 {
+                    maker.apply_fill(match_qty);
+                    let exec_id = self.execution_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                    matched_trade = Some(Trade {
+                        execution_id: exec_id,
+                        maker_order_id: maker.id,
+                        taker_order_id: 0,
+                        maker_account_id: maker.account_id.clone(),
+                        taker_account_id: taker_account_id.to_string(),
+                        symbol: self.symbol.clone(),
+                        side: match side {
+                            Side::Buy => Side::Sell,
+                            Side::Sell => Side::Buy,
+                        },
+                        price: exec_price,
+                        quantity: match_qty,
+                        fee: 0.0,
+                        timestamp: now,
+                    });
+                    if maker.remaining_quantity <= 1e-9 {
+                        maker.status = OrderStatus::Filled;
+                        fully_filled = true;
+                    } else {
+                        maker.status = OrderStatus::PartiallyFilled;
+                    }
+                }
+                break;
+            }
+        }
+
+        if fully_filled {
+            queue.retain(|o| o.id != order_id);
+            self.order_map.remove(&order_id);
+            if queue.is_empty() {
+                match side {
+                    Side::Buy => {
+                        self.bids.remove(&tick);
+                    }
+                    Side::Sell => {
+                        self.asks.remove(&tick);
+                    }
+                };
+            }
+        }
+
+        matched_trade
+    }
+
     pub fn total_orders(&self) -> usize {
         self.order_map.len()
     }

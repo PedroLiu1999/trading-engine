@@ -1,6 +1,6 @@
 use crate::event_bus::EngineEvent;
 use crate::execution_engine::ExecutionEngine;
-use crate::python::types::{PyAccount, PyMarketDepth, PyOrder, PyPosition, PyRiskConfig};
+use crate::python::types::{PyAccount, PyMarketDepth, PyOrder, PyPosition, PyRiskConfig, PyTrade};
 use crate::risk_manager::RiskConfig;
 use crate::types::{OrderType, Side, TimeInForce};
 use crossbeam_channel::Receiver;
@@ -117,6 +117,25 @@ impl PyEngine {
             .cancel_order(symbol, order_id)
             .map(PyOrder::from)
             .map_err(|e| PyKeyError::new_err(e.to_string()))
+    }
+
+    fn get_order(&self, symbol: &str, order_id: u64) -> Option<PyOrder> {
+        self.engine.get_order(symbol, order_id).map(Into::into)
+    }
+
+    #[pyo3(signature = (symbol, order_id, fill_price, fill_quantity, taker_account_id="KRAKEN_TAKER"))]
+    fn fill_resting_order(
+        &self,
+        symbol: &str,
+        order_id: u64,
+        fill_price: f64,
+        fill_quantity: f64,
+        taker_account_id: &str,
+    ) -> PyResult<Option<PyTrade>> {
+        self.engine
+            .fill_resting_order(symbol, order_id, fill_price, fill_quantity, taker_account_id)
+            .map(|opt| opt.map(PyTrade::from))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     #[pyo3(signature = (symbol, levels=10))]

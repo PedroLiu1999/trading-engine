@@ -6,6 +6,9 @@ updates continuously in real-time until stopped (Ctrl+C).
 """
 
 import argparse
+import asyncio
+import copy
+import json
 import os
 import random
 import time
@@ -18,6 +21,8 @@ from trading_engine import (
     KrakenOrderBookReplayer,
     MarketDepth,
     RiskConfig,
+    normalize_kraken_rest_pair,
+    normalize_kraken_ws_pair,
 )
 
 
@@ -110,8 +115,8 @@ def run_single_kraken_backtest(
     STOP_LOSS_PTS = 2.00  # $2.00 stop loss
 
     resting_order_id = None
+    in_position = False
     trades_executed = 0
-    prev_qty = 0.0
     entry_trade_idx = 0
 
     peak_equity = 250_000.0
@@ -126,13 +131,17 @@ def run_single_kraken_backtest(
     trade_limit = min(trade_limit, len(session.trades))
 
     for trade_idx in range(trade_limit):
-        # 1. Apply any real-time book update deltas up to this trade timestamp
-        if trade_idx < len(session.trades):
-            replayer.apply_deltas_until(session.trades[trade_idx].timestamp)
+        trade = session.trades[trade_idx]
+
+        # 1. Apply any real-time book deltas strictly BEFORE this trade (strict < and seq tie-break)
+        replayer.apply_deltas_until(trade.timestamp, trade.seq)
 
         depth = engine.get_depth(symbol, levels=4)
         if not depth:
-            replayer.replay_next_trade()
+            if resting_order_id is not None:
+                replayer.try_fill_resting(trade, resting_order_id)
+            else:
+                replayer.advance_trade()
             continue
 
         metrics = compute_order_book_metrics(depth, max_levels=4)
@@ -152,11 +161,7 @@ def run_single_kraken_backtest(
         pnl_history.append(
             {
                 "trade_idx": trade_idx,
-                "timestamp": (
-                    session.trades[trade_idx].timestamp
-                    if trade_idx < len(session.trades)
-                    else float(trade_idx)
-                ),
+                "timestamp": trade.timestamp,
                 "realized_pnl": acct.realized_pnl if acct else 0.0,
                 "unrealized_pnl": unrealized,
                 "total_pnl": (acct.realized_pnl if acct else 0.0) + unrealized,
@@ -166,83 +171,138 @@ def run_single_kraken_backtest(
             }
         )
 
-        # Detect new fill
-        if abs(curr_qty) > 0.0 and abs(prev_qty) < 0.001:
-            trades_executed += 1
-            entry_trade_idx = trade_idx
-            resting_order_id = None
-            random_desired_side = None
+        # State transition: check entry completion or exit completion
+        if not in_position:
+            # Gate entry detection on abs(curr_qty) >= ORDER_QTY * 0.99
+            if abs(curr_qty) >= ORDER_QTY * 0.99:
+                in_position = True
+                entry_trade_idx = trade_idx
+                trades_executed += 1
+                random_desired_side = None
+                # Cancel any remaining unfulfilled portion of the entry quote
+                if resting_order_id is not None:
+                    try:
+                        engine.cancel_order(symbol, resting_order_id)
+                    except Exception:
+                        pass
+                    resting_order_id = None
+        else:
+            # Gate exit detection on position returning flat
+            if abs(curr_qty) < 0.001:
+                in_position = False
+                if resting_order_id is not None:
+                    try:
+                        engine.cancel_order(symbol, resting_order_id)
+                    except Exception:
+                        pass
+                    resting_order_id = None
 
-        # Case 1: Flat -> Look for entry
-        if abs(curr_qty) < 0.001:
-            if resting_order_id is not None:
-                try:
-                    engine.cancel_order(symbol, resting_order_id)
-                except Exception:
-                    pass
+        # Verify active status of resting order
+        if resting_order_id is not None:
+            order_info = engine.get_order(symbol, resting_order_id)
+            if order_info is None or not order_info.is_active():
                 resting_order_id = None
 
-            if not is_random:
-                if wobi >= WOBI_ENTRY_THRESH and metrics["best_bid"] > 0:
-                    order = engine.submit_order(
-                        symbol=symbol,
-                        side="BUY",
-                        order_type="LIMIT",
-                        price=metrics["best_bid"],
-                        quantity=ORDER_QTY,
-                        time_in_force="GTC",
-                        account_id=strat_account,
-                    )
-                    resting_order_id = order.id
-                elif wobi <= -WOBI_ENTRY_THRESH and metrics["best_ask"] > 0:
-                    order = engine.submit_order(
-                        symbol=symbol,
-                        side="SELL",
-                        order_type="LIMIT",
-                        price=metrics["best_ask"],
-                        quantity=ORDER_QTY,
-                        time_in_force="GTC",
-                        account_id=strat_account,
-                    )
-                    resting_order_id = order.id
-            else:
-                # Random entry attempt
-                if random_desired_side is None:
-                    if rng.random() < 0.35:
-                        random_desired_side = "BUY" if rng.random() < 0.50 else "SELL"
+        # Quoting Decisions
+        if not in_position:
+            # Flat: look for new entry quote. (If partially filled, keep resting order alive)
+            if abs(curr_qty) < 0.001:
+                if not is_random:
+                    desired_side = None
+                    desired_price = 0.0
+                    if wobi >= WOBI_ENTRY_THRESH and metrics["best_bid"] > 0:
+                        desired_side = "BUY"
+                        desired_price = metrics["best_bid"]
+                    elif wobi <= -WOBI_ENTRY_THRESH and metrics["best_ask"] > 0:
+                        desired_side = "SELL"
+                        desired_price = metrics["best_ask"]
 
-                if random_desired_side == "BUY" and metrics["best_bid"] > 0:
-                    order = engine.submit_order(
-                        symbol=symbol,
-                        side="BUY",
-                        order_type="LIMIT",
-                        price=metrics["best_bid"],
-                        quantity=ORDER_QTY,
-                        time_in_force="GTC",
-                        account_id=strat_account,
-                    )
-                    resting_order_id = order.id
-                elif random_desired_side == "SELL" and metrics["best_ask"] > 0:
-                    order = engine.submit_order(
-                        symbol=symbol,
-                        side="SELL",
-                        order_type="LIMIT",
-                        price=metrics["best_ask"],
-                        quantity=ORDER_QTY,
-                        time_in_force="GTC",
-                        account_id=strat_account,
-                    )
-                    resting_order_id = order.id
+                    if desired_side:
+                        if resting_order_id is not None:
+                            curr_order = engine.get_order(symbol, resting_order_id)
+                            if (
+                                curr_order is None
+                                or str(curr_order.side).upper() != desired_side
+                                or abs(curr_order.price - desired_price) > 0.001
+                            ):
+                                try:
+                                    engine.cancel_order(symbol, resting_order_id)
+                                except Exception:
+                                    pass
+                                resting_order_id = None
 
-        # Case 2: In position -> Quote opposite side passively
+                        if resting_order_id is None:
+                            try:
+                                order = engine.submit_order(
+                                    symbol=symbol,
+                                    side=desired_side,
+                                    order_type="LIMIT",
+                                    price=desired_price,
+                                    quantity=ORDER_QTY,
+                                    time_in_force="GTC",
+                                    account_id=strat_account,
+                                )
+                                resting_order_id = order.id
+                            except Exception:
+                                pass
+                    else:
+                        if resting_order_id is not None:
+                            try:
+                                engine.cancel_order(symbol, resting_order_id)
+                            except Exception:
+                                pass
+                            resting_order_id = None
+                else:
+                    # Random baseline entry
+                    if random_desired_side is None:
+                        if rng.random() < 0.35:
+                            random_desired_side = "BUY" if rng.random() < 0.50 else "SELL"
+
+                    desired_price = (
+                        metrics["best_bid"] if random_desired_side == "BUY" else metrics["best_ask"]
+                    )
+                    if random_desired_side and desired_price > 0:
+                        if resting_order_id is not None:
+                            curr_order = engine.get_order(symbol, resting_order_id)
+                            if (
+                                curr_order is None
+                                or str(curr_order.side).upper() != random_desired_side
+                                or abs(curr_order.price - desired_price) > 0.001
+                            ):
+                                try:
+                                    engine.cancel_order(symbol, resting_order_id)
+                                except Exception:
+                                    pass
+                                resting_order_id = None
+
+                        if resting_order_id is None:
+                            try:
+                                order = engine.submit_order(
+                                    symbol=symbol,
+                                    side=random_desired_side,
+                                    order_type="LIMIT",
+                                    price=desired_price,
+                                    quantity=ORDER_QTY,
+                                    time_in_force="GTC",
+                                    account_id=strat_account,
+                                )
+                                resting_order_id = order.id
+                            except Exception:
+                                pass
+                    elif resting_order_id is not None:
+                        try:
+                            engine.cancel_order(symbol, resting_order_id)
+                        except Exception:
+                            pass
+                        resting_order_id = None
         else:
+            # In position: quote passive exit on opposite side or execute emergency stop
             hold_trades = trade_idx - entry_trade_idx
             pnl_pts = (
                 (metrics["best_bid"] - avg_entry)
                 if curr_qty > 0
                 else (avg_entry - metrics["best_ask"])
             )
-
             should_emergency = (pnl_pts <= -STOP_LOSS_PTS) or (hold_trades >= MAX_HOLD_TRADES)
 
             if should_emergency:
@@ -271,13 +331,19 @@ def run_single_kraken_backtest(
                 exit_side = "SELL" if curr_qty > 0 else "BUY"
 
                 if resting_order_id is not None:
-                    try:
-                        engine.cancel_order(symbol, resting_order_id)
-                    except Exception:
-                        pass
-                    resting_order_id = None
+                    curr_order = engine.get_order(symbol, resting_order_id)
+                    if (
+                        curr_order is None
+                        or abs(curr_order.price - exit_price) > 0.001
+                        or abs(curr_order.remaining_quantity - abs(curr_qty)) > 0.001
+                    ):
+                        try:
+                            engine.cancel_order(symbol, resting_order_id)
+                        except Exception:
+                            pass
+                        resting_order_id = None
 
-                if exit_price > 0.0:
+                if resting_order_id is None and exit_price > 0.0:
                     try:
                         order = engine.submit_order(
                             symbol=symbol,
@@ -291,25 +357,12 @@ def run_single_kraken_backtest(
                         resting_order_id = order.id
                     except Exception:
                         pass
-                else:
-                    # Depleted book side; safely close via market IOC
-                    try:
-                        engine.submit_order(
-                            symbol=symbol,
-                            side=exit_side,
-                            order_type="MARKET",
-                            price=0.0,
-                            quantity=abs(curr_qty),
-                            time_in_force="IOC",
-                            account_id=strat_account,
-                        )
-                    except Exception:
-                        pass
 
-        prev_qty = curr_qty
-
-        # Replay real market taker trade against the book
-        replayer.replay_next_trade()
+        # Try fill strategy resting order against the market trade (without touching KRAKEN_MAKER)
+        if resting_order_id is not None:
+            replayer.try_fill_resting(trade, resting_order_id)
+        else:
+            replayer.advance_trade()
 
     # Clean up
     if resting_order_id is not None:
@@ -491,15 +544,16 @@ def plot_pnl_over_time(
     print(f"\n[Chart Saved] Performance plot written to: {output_file}")
 
 
-def run_kraken_live_stream(
-    client: KrakenClient,
-    pair: str = "ETHUSD",
+async def _async_run_kraken_live_stream(
+    pair: str = "ETH/USD",
     symbol: str = "ETH-USDT",
-    poll_interval: float = 1.0,
+    depth_limit: int = 100,
 ) -> None:
-    """Continuously streams live Kraken market data in real-time until stopped (Ctrl+C)."""
+    import websockets
+
+    pair_ws = normalize_kraken_ws_pair(pair)
     print("=" * 75)
-    print(f"Kraken Real-Time Live Market Execution ({pair}) - Running until Ctrl+C")
+    print(f"Kraken Real-Time Live Market Execution ({pair_ws}) - WebSocket v2 Feed")
     print("=" * 75)
 
     risk = RiskConfig(
@@ -514,203 +568,350 @@ def run_kraken_live_stream(
     engine = Engine(initial_balance=250_000.0, leverage=2.0, risk_config=risk)
     engine.register_symbol(symbol, tick_size=0.01, lot_size=0.001)
 
-    print("Fetching live order book depth from Kraken...")
-    raw_depth = client.fetch_depth(pair=pair, count=50)
-    for p, q, *_ in reversed(raw_depth["bids"]):
-        if float(q) > 0.0:
-            engine.submit_order(
-                symbol, "BUY", "LIMIT", float(p), float(q), "GTC", account_id="KRAKEN_MAKER"
-            )
-    for p, q, *_ in reversed(raw_depth["asks"]):
-        if float(q) > 0.0:
-            engine.submit_order(
-                symbol, "SELL", "LIMIT", float(p), float(q), "GTC", account_id="KRAKEN_MAKER"
-            )
-
-    depth = engine.get_depth(symbol, levels=2)
-    best_bid = depth.best_bid() if depth else 0.0
-    best_ask = depth.best_ask() if depth else 0.0
-    print(f"Live Book Initialized: BestBid=${best_bid:,.2f} | BestAsk=${best_ask:,.2f}")
-
-    raw_t = client._get("Trades", {"pair": pair})
-    last_cursor = raw_t.get("last")
-    print(f"Initial Trade Cursor: {last_cursor}")
-    print("Streaming live market trades in real-time... (Press Ctrl+C to stop)\n")
-
+    maker_account = "KRAKEN_MAKER"
+    taker_account = "KRAKEN_TAKER"
     strat_account = "OBI_SCALPER"
+
     ORDER_QTY = 1.0
     WOBI_ENTRY_THRESH = 0.15
     STOP_LOSS_PTS = 2.00
     MAX_HOLD_TRADES = 30
 
-    resting_order_id = None
+    maker_orders: dict[tuple[str, float], int] = {}
+    resting_order_id: int | None = None
+    in_position = False
+    entry_trade_idx = 0
     trades_processed = 0
     strategy_entries = 0
-    prev_qty = 0.0
-    entry_trade_idx = 0
     peak_equity = 250_000.0
     max_drawdown = 0.0
 
+    print("Connecting to Kraken WebSocket API v2 (wss://ws.kraken.com/v2)...")
     try:
-        while True:
-            time.sleep(poll_interval)
-
-            try:
-                t_res = client._get("Trades", {"pair": pair, "since": last_cursor})
-                pair_key = next(k for k in t_res.keys() if k != "last")
-                new_trades = t_res[pair_key]
-                next_cursor = t_res.get("last")
-                if next_cursor:
-                    last_cursor = next_cursor
-            except Exception:
-                continue
-
-            if not new_trades:
-                continue
-
-            for item in new_trades:
-                trades_processed += 1
-                qty = float(item[1])
-                trade_side = "BUY" if item[3] == "b" else "SELL"
-
-                cur_depth = engine.get_depth(symbol, levels=4)
-                if not cur_depth:
-                    continue
-                metrics = compute_order_book_metrics(cur_depth, max_levels=4)
-                wobi = metrics["wobi"]
-
-                pos = engine.get_position(symbol, account_id=strat_account)
-                curr_qty = pos.quantity if pos else 0.0
-                avg_entry = pos.avg_entry_price if pos else 0.0
-
-                acct = engine.get_account(strat_account)
-                current_cash = acct.cash_balance if acct else 250_000.0
-                unrealized = pos.unrealized_pnl if pos else 0.0
-                equity = current_cash + unrealized
-                peak_equity = max(peak_equity, equity)
-                max_drawdown = max(max_drawdown, peak_equity - equity)
-
-                if abs(curr_qty) > 0.0 and abs(prev_qty) < 0.001:
-                    strategy_entries += 1
-                    entry_trade_idx = trades_processed
-                    resting_order_id = None
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] >>> STRATEGY FILLED: "
-                        f"{curr_qty:+.2f} ETH @ ${avg_entry:.2f}"
-                    )
-
-                # Strategy order decision
-                if abs(curr_qty) < 0.001:
-                    if resting_order_id is not None:
-                        try:
-                            engine.cancel_order(symbol, resting_order_id)
-                        except Exception:
-                            pass
-                        resting_order_id = None
-
-                    if wobi >= WOBI_ENTRY_THRESH and metrics["best_bid"] > 0:
-                        order = engine.submit_order(
-                            symbol=symbol,
-                            side="BUY",
-                            order_type="LIMIT",
-                            price=metrics["best_bid"],
-                            quantity=ORDER_QTY,
-                            time_in_force="GTC",
-                            account_id=strat_account,
-                        )
-                        resting_order_id = order.id
-                    elif wobi <= -WOBI_ENTRY_THRESH and metrics["best_ask"] > 0:
-                        order = engine.submit_order(
-                            symbol=symbol,
-                            side="SELL",
-                            order_type="LIMIT",
-                            price=metrics["best_ask"],
-                            quantity=ORDER_QTY,
-                            time_in_force="GTC",
-                            account_id=strat_account,
-                        )
-                        resting_order_id = order.id
-                else:
-                    hold_trades = trades_processed - entry_trade_idx
-                    pnl_pts = (
-                        (metrics["best_bid"] - avg_entry)
-                        if curr_qty > 0
-                        else (avg_entry - metrics["best_ask"])
-                    )
-                    should_emergency = (pnl_pts <= -STOP_LOSS_PTS) or (
-                        hold_trades >= MAX_HOLD_TRADES
-                    )
-
-                    if should_emergency:
-                        if resting_order_id is not None:
-                            try:
-                                engine.cancel_order(symbol, resting_order_id)
-                            except Exception:
-                                pass
-                            resting_order_id = None
-                        exit_side = "SELL" if curr_qty > 0 else "BUY"
-                        try:
-                            engine.submit_order(
-                                symbol=symbol,
-                                side=exit_side,
-                                order_type="MARKET",
-                                price=0.0,
-                                quantity=abs(curr_qty),
-                                time_in_force="IOC",
-                                account_id=strat_account,
-                            )
-                        except Exception:
-                            pass
-                    else:
-                        exit_price = metrics["best_ask"] if curr_qty > 0 else metrics["best_bid"]
-                        exit_side = "SELL" if curr_qty > 0 else "BUY"
-                        if resting_order_id is not None:
-                            try:
-                                engine.cancel_order(symbol, resting_order_id)
-                            except Exception:
-                                pass
-                            resting_order_id = None
-
-                        if exit_price > 0.0:
-                            try:
-                                order = engine.submit_order(
-                                    symbol=symbol,
-                                    side=exit_side,
-                                    order_type="LIMIT",
-                                    price=exit_price,
-                                    quantity=abs(curr_qty),
-                                    time_in_force="GTC",
-                                    account_id=strat_account,
-                                )
-                                resting_order_id = order.id
-                            except Exception:
-                                pass
-
-                prev_qty = curr_qty
-
-                # Execute real market taker trade against the book
-                try:
-                    engine.submit_order(
-                        symbol=symbol,
-                        side=trade_side,
-                        order_type="MARKET",
-                        price=0.0,
-                        quantity=qty,
-                        time_in_force="IOC",
-                        account_id="KRAKEN_TAKER",
-                    )
-                except Exception:
-                    pass
-
-            acct = engine.get_account(strat_account)
-            pnl = acct.realized_pnl if acct else 0.0
-            print(
-                f"[{time.strftime('%H:%M:%S')}] Live Trades: {trades_processed} | "
-                f"Mid: ${metrics['mid_price']:>7.2f} | WOBI: {wobi:>+5.2f} | "
-                f"Pos: {curr_qty:>+4.1f} | PnL: ${pnl:>+6.2f}"
+        async with websockets.connect(
+            "wss://ws.kraken.com/v2", ping_interval=20, ping_timeout=10
+        ) as ws:
+            # Subscribe to book and trade
+            await ws.send(
+                json.dumps(
+                    {
+                        "method": "subscribe",
+                        "params": {"channel": "book", "symbol": [pair_ws], "depth": depth_limit},
+                    }
+                )
             )
+            await ws.send(
+                json.dumps(
+                    {
+                        "method": "subscribe",
+                        "params": {"channel": "trade", "symbol": [pair_ws]},
+                    }
+                )
+            )
+            print(f"Subscribed to book (depth={depth_limit}) and trade channels for {pair_ws}...")
+            print("Streaming live market feed... (Press Ctrl+C to stop)\n")
 
-    except KeyboardInterrupt:
+            while True:
+                raw_msg = await ws.recv()
+                msg = json.loads(raw_msg)
+                if msg.get("method") == "subscribe":
+                    if not msg.get("success", True):
+                        print(f"\n[Kraken WS Error] Subscription rejected: {msg.get('error')}")
+                    continue
+
+                channel = msg.get("channel")
+                msg_type = msg.get("type")
+                data_list = msg.get("data", [])
+
+                if channel == "book":
+                    if msg_type == "snapshot" and data_list:
+                        snap = data_list[0]
+                        for oid in maker_orders.values():
+                            try:
+                                engine.cancel_order(symbol, oid)
+                            except Exception:
+                                pass
+                        maker_orders.clear()
+
+                        for b in reversed(snap.get("bids", [])):
+                            p, q = float(b["price"]), float(b["qty"])
+                            if q > 0 and p > 0:
+                                try:
+                                    ord_obj = engine.submit_order(
+                                        symbol, "BUY", "LIMIT", p, q, "GTC", maker_account
+                                    )
+                                    maker_orders[("BUY", p)] = ord_obj.id
+                                except Exception:
+                                    pass
+                        for a in reversed(snap.get("asks", [])):
+                            p, q = float(a["price"]), float(a["qty"])
+                            if q > 0 and p > 0:
+                                try:
+                                    ord_obj = engine.submit_order(
+                                        symbol, "SELL", "LIMIT", p, q, "GTC", maker_account
+                                    )
+                                    maker_orders[("SELL", p)] = ord_obj.id
+                                except Exception:
+                                    pass
+                        d = engine.get_depth(symbol, levels=1)
+                        bb = d.best_bid() if d else 0.0
+                        ba = d.best_ask() if d else 0.0
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] Live book initialized: "
+                            f"BestBid=${bb:,.2f} | BestAsk=${ba:,.2f}"
+                        )
+
+                    elif msg_type == "update" and data_list:
+                        upd = data_list[0]
+                        for b in upd.get("bids", []):
+                            p, q = float(b["price"]), float(b["qty"])
+                            prior_id = maker_orders.pop(("BUY", p), None)
+                            if prior_id is not None:
+                                try:
+                                    engine.cancel_order(symbol, prior_id)
+                                except Exception:
+                                    pass
+                            if q > 0:
+                                try:
+                                    ord_obj = engine.submit_order(
+                                        symbol, "BUY", "LIMIT", p, q, "GTC", maker_account
+                                    )
+                                    maker_orders[("BUY", p)] = ord_obj.id
+                                except Exception:
+                                    pass
+                        for a in upd.get("asks", []):
+                            p, q = float(a["price"]), float(a["qty"])
+                            prior_id = maker_orders.pop(("SELL", p), None)
+                            if prior_id is not None:
+                                try:
+                                    engine.cancel_order(symbol, prior_id)
+                                except Exception:
+                                    pass
+                            if q > 0:
+                                try:
+                                    ord_obj = engine.submit_order(
+                                        symbol, "SELL", "LIMIT", p, q, "GTC", maker_account
+                                    )
+                                    maker_orders[("SELL", p)] = ord_obj.id
+                                except Exception:
+                                    pass
+
+                elif channel == "trade" and data_list:
+                    for t in data_list:
+                        trades_processed += 1
+                        t_price = float(t["price"])
+                        t_qty = float(t["qty"])
+                        t_side = "BUY" if t.get("side", "").lower() == "buy" else "SELL"
+
+                        cur_depth = engine.get_depth(symbol, levels=4)
+                        if not cur_depth:
+                            continue
+                        metrics = compute_order_book_metrics(cur_depth, max_levels=4)
+                        wobi = metrics["wobi"]
+
+                        pos = engine.get_position(symbol, account_id=strat_account)
+                        curr_qty = pos.quantity if pos else 0.0
+                        avg_entry = pos.avg_entry_price if pos else 0.0
+
+                        acct = engine.get_account(strat_account)
+                        current_cash = acct.cash_balance if acct else 250_000.0
+                        unrealized = pos.unrealized_pnl if pos else 0.0
+                        equity = current_cash + unrealized
+                        peak_equity = max(peak_equity, equity)
+                        max_drawdown = max(max_drawdown, peak_equity - equity)
+
+                        # State machine & Orphaned-order fix:
+                        if not in_position:
+                            if abs(curr_qty) >= ORDER_QTY * 0.99:
+                                in_position = True
+                                entry_trade_idx = trades_processed
+                                strategy_entries += 1
+                                if resting_order_id is not None:
+                                    try:
+                                        engine.cancel_order(symbol, resting_order_id)
+                                    except Exception:
+                                        pass
+                                    resting_order_id = None
+                                print(
+                                    f"[{time.strftime('%H:%M:%S')}] >>> STRATEGY FILLED ENTRY: "
+                                    f"{curr_qty:+.2f} ETH @ ${avg_entry:.2f}"
+                                )
+                        else:
+                            if abs(curr_qty) < 0.001:
+                                in_position = False
+                                if resting_order_id is not None:
+                                    try:
+                                        engine.cancel_order(symbol, resting_order_id)
+                                    except Exception:
+                                        pass
+                                    resting_order_id = None
+                                pnl_val = acct.realized_pnl if acct else 0.0
+                                print(
+                                    f"[{time.strftime('%H:%M:%S')}] >>> STRATEGY CLOSED OUT: "
+                                    f"Flat | Realized PnL: ${pnl_val:+.2f}"
+                                )
+
+                        # Order quoting decisions
+                        if resting_order_id is not None:
+                            order_info = engine.get_order(symbol, resting_order_id)
+                            if order_info is None or not order_info.is_active():
+                                resting_order_id = None
+
+                        if not in_position:
+                            if abs(curr_qty) < 0.001:
+                                desired_side = None
+                                desired_price = 0.0
+                                if wobi >= WOBI_ENTRY_THRESH and metrics["best_bid"] > 0:
+                                    desired_side = "BUY"
+                                    desired_price = metrics["best_bid"]
+                                elif wobi <= -WOBI_ENTRY_THRESH and metrics["best_ask"] > 0:
+                                    desired_side = "SELL"
+                                    desired_price = metrics["best_ask"]
+
+                                if desired_side:
+                                    if resting_order_id is not None:
+                                        curr_order = engine.get_order(symbol, resting_order_id)
+                                        if (
+                                            curr_order is None
+                                            or str(curr_order.side).upper() != desired_side
+                                            or abs(curr_order.price - desired_price) > 0.001
+                                        ):
+                                            try:
+                                                engine.cancel_order(symbol, resting_order_id)
+                                            except Exception:
+                                                pass
+                                            resting_order_id = None
+
+                                    if resting_order_id is None:
+                                        try:
+                                            order = engine.submit_order(
+                                                symbol=symbol,
+                                                side=desired_side,
+                                                order_type="LIMIT",
+                                                price=desired_price,
+                                                quantity=ORDER_QTY,
+                                                time_in_force="GTC",
+                                                account_id=strat_account,
+                                            )
+                                            resting_order_id = order.id
+                                        except Exception:
+                                            pass
+                                elif resting_order_id is not None:
+                                    try:
+                                        engine.cancel_order(symbol, resting_order_id)
+                                    except Exception:
+                                        pass
+                                    resting_order_id = None
+                        else:
+                            hold_trades = trades_processed - entry_trade_idx
+                            pnl_pts = (
+                                (metrics["best_bid"] - avg_entry)
+                                if curr_qty > 0
+                                else (avg_entry - metrics["best_ask"])
+                            )
+                            should_emergency = (pnl_pts <= -STOP_LOSS_PTS) or (
+                                hold_trades >= MAX_HOLD_TRADES
+                            )
+
+                            if should_emergency:
+                                if resting_order_id is not None:
+                                    try:
+                                        engine.cancel_order(symbol, resting_order_id)
+                                    except Exception:
+                                        pass
+                                    resting_order_id = None
+                                exit_side = "SELL" if curr_qty > 0 else "BUY"
+                                try:
+                                    engine.submit_order(
+                                        symbol=symbol,
+                                        side=exit_side,
+                                        order_type="MARKET",
+                                        price=0.0,
+                                        quantity=abs(curr_qty),
+                                        time_in_force="IOC",
+                                        account_id=strat_account,
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                exit_price = (
+                                    metrics["best_ask"] if curr_qty > 0 else metrics["best_bid"]
+                                )
+                                exit_side = "SELL" if curr_qty > 0 else "BUY"
+
+                                if resting_order_id is not None:
+                                    curr_order = engine.get_order(symbol, resting_order_id)
+                                    if (
+                                        curr_order is None
+                                        or abs(curr_order.price - exit_price) > 0.001
+                                        or abs(curr_order.remaining_quantity - abs(curr_qty))
+                                        > 0.001
+                                    ):
+                                        try:
+                                            engine.cancel_order(symbol, resting_order_id)
+                                        except Exception:
+                                            pass
+                                        resting_order_id = None
+
+                                if resting_order_id is None and exit_price > 0.0:
+                                    try:
+                                        order = engine.submit_order(
+                                            symbol=symbol,
+                                            side=exit_side,
+                                            order_type="LIMIT",
+                                            price=exit_price,
+                                            quantity=abs(curr_qty),
+                                            time_in_force="GTC",
+                                            account_id=strat_account,
+                                        )
+                                        resting_order_id = order.id
+                                    except Exception:
+                                        pass
+
+                        # Try fill resting order from the trade without touching KRAKEN_MAKER
+                        if resting_order_id is not None:
+                            order = engine.get_order(symbol, resting_order_id)
+                            if order is not None and order.is_active():
+                                order_side = str(order.side).upper()
+                                crossed = False
+                                if (
+                                    "BUY" in order_side
+                                    and t_side == "SELL"
+                                    and t_price <= order.price
+                                ):
+                                    crossed = True
+                                elif (
+                                    "SELL" in order_side
+                                    and t_side == "BUY"
+                                    and t_price >= order.price
+                                ):
+                                    crossed = True
+
+                                if crossed:
+                                    fill_qty = min(t_qty, order.remaining_quantity)
+                                    if fill_qty > 1e-9:
+                                        try:
+                                            engine.fill_resting_order(
+                                                symbol=symbol,
+                                                order_id=resting_order_id,
+                                                fill_price=order.price,
+                                                fill_quantity=fill_qty,
+                                                taker_account_id=taker_account,
+                                            )
+                                        except Exception:
+                                            pass
+
+                        # Periodic live log
+                        if trades_processed % 5 == 0:
+                            acct = engine.get_account(strat_account)
+                            pnl = acct.realized_pnl if acct else 0.0
+                            print(
+                                f"[{time.strftime('%H:%M:%S')}] Live Trades: {trades_processed} | "
+                                f"Mid: ${metrics['mid_price']:>7.2f} | WOBI: {wobi:>+5.2f} | "
+                                f"Pos: {curr_qty:>+4.1f} | PnL: ${pnl:>+6.2f}"
+                            )
+
+    except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n[Stop Signal Received] Closing open positions and finalizing summary...")
 
     # Cleanup
@@ -741,7 +942,7 @@ def run_kraken_live_stream(
     cash_balance = strat_acct.cash_balance if strat_acct else 250_000.0
 
     print("\n" + "=" * 75)
-    print(f"Kraken Live Session Performance Summary ({pair}):")
+    print(f"Kraken Live Session Performance Summary ({pair_ws}):")
     print(f"  Account ID              : {strat_account}")
     print(f"  Live Trades Processed   : {trades_processed}")
     print(f"  Inventory Entries       : {strategy_entries}")
@@ -749,6 +950,19 @@ def run_kraken_live_stream(
     print(f"  Max Drawdown            : ${max_drawdown:>10.2f}")
     print(f"  Final Cash Balance      : ${cash_balance:,.2f}")
     print("=" * 75)
+
+
+def run_kraken_live_stream(
+    client: KrakenClient | None = None,
+    pair: str = "ETH/USD",
+    symbol: str = "ETH-USDT",
+    poll_interval: float = 1.0,
+) -> None:
+    """Continuously streams live Kraken market data in real-time until stopped (Ctrl+C)."""
+    try:
+        asyncio.run(_async_run_kraken_live_stream(pair=pair, symbol=symbol))
+    except KeyboardInterrupt:
+        pass
 
 
 def main():
@@ -812,19 +1026,21 @@ def main():
     args = parser.parse_args()
 
     client = KrakenClient()
+    pair_ws = normalize_kraken_ws_pair(args.pair)
+    pair_rest = normalize_kraken_rest_pair(args.pair)
 
     if args.live:
         # Live streaming mode: runs continuously until stopped
         run_kraken_live_stream(
             client=client,
-            pair=args.pair,
+            pair=pair_ws,
             symbol="ETH-USDT",
             poll_interval=args.poll_interval,
         )
         return
 
     # Backtest Mode (Parquet Replay with Full L2 Depth & Deltas)
-    pair_clean = args.pair.lower().replace("/", "").replace("-", "").replace("_", "")
+    pair_clean = pair_rest.lower()
     depth_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_depth.parquet")
     trades_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_trades.parquet")
     deltas_pq = os.path.join(args.data_dir, f"kraken_{pair_clean}_deltas.parquet")
@@ -846,14 +1062,14 @@ def main():
         else:
             print(f"Recording Kraken WebSocket v2 live feed for {record_secs} seconds...")
 
-        recorder = KrakenWebSocketRecorder(pair=args.pair)
+        recorder = KrakenWebSocketRecorder(pair=pair_ws)
         session = recorder.record(duration_seconds=record_secs, output_dir=args.data_dir)
     else:
-        print(f"Loading cached Kraken L2 Parquet dataset ({args.pair})...")
+        print(f"Loading cached Kraken L2 Parquet dataset ({pair_ws})...")
         session = client.load_from_parquet(
             depth_pq,
             trades_pq,
-            pair=args.pair,
+            pair=pair_rest,
             deltas_file=deltas_pq,
         )
 
@@ -866,26 +1082,41 @@ def main():
     print("Kraken Real-Market Order Book Backtest (OBI vs. Random Baseline)")
     print("=" * 75)
 
-    # 1. Run OBI Strategy on real Kraken flow
+    n_deltas_orig = len(session.deltas) if session.deltas else 0
+    n_trades_orig = len(session.trades)
+    n_bids_orig = len(session.bids)
+    n_asks_orig = len(session.asks)
+
+    # 1. Run OBI Strategy on deep-copied session
+    session_obi = copy.deepcopy(session)
     obi_trades, obi_pnl, obi_dd, obi_history = run_single_kraken_backtest(
-        session=session,
+        session=session_obi,
         mode="OBI",
         symbol="ETH-USDT",
         max_trades=args.max_trades,
         seed=101,
         verbose=False,
     )
+    assert len(session.deltas or []) == n_deltas_orig, "Session deltas mutated during OBI run!"
+    assert len(session.trades) == n_trades_orig, "Session trades mutated during OBI run!"
+    assert len(session.bids) == n_bids_orig, "Session bids mutated during OBI run!"
+    assert len(session.asks) == n_asks_orig, "Session asks mutated during OBI run!"
 
-    # 2. Run Random Baseline on exact same real Kraken flow
+    # 2. Run Random Baseline on deep-copied session
     print("\n--- Running Random-Entry Same-Exit Baseline on Kraken Market Flow ---")
+    session_rand = copy.deepcopy(session)
     rand_trades, rand_pnl, rand_dd, rand_history = run_single_kraken_backtest(
-        session=session,
+        session=session_rand,
         mode="RANDOM",
         symbol="ETH-USDT",
         max_trades=args.max_trades,
         seed=101,
         verbose=False,
     )
+    assert len(session.deltas or []) == n_deltas_orig, "Session deltas mutated during RANDOM run!"
+    assert len(session.trades) == n_trades_orig, "Session trades mutated during RANDOM run!"
+    assert len(session.bids) == n_bids_orig, "Session bids mutated during RANDOM run!"
+    assert len(session.asks) == n_asks_orig, "Session asks mutated during RANDOM run!"
 
     # 3. Side-by-side comparison
     print("\n" + "=" * 75)
@@ -905,7 +1136,7 @@ def main():
         plot_pnl_over_time(
             obi_history=obi_history,
             rand_history=rand_history,
-            symbol=args.pair,
+            symbol=pair_ws,
             output_file=args.plot_file,
         )
 

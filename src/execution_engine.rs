@@ -2,7 +2,9 @@ use crate::event_bus::{EngineEvent, EventBus};
 use crate::order_book::OrderBook;
 use crate::position_manager::{Account, Position, PositionManager};
 use crate::risk_manager::{RiskConfig, RiskManager, RiskRejection};
-use crate::types::{MarketDepth, Order, OrderId, OrderStatus, OrderType, Side, TimeInForce};
+use crate::types::{
+    MarketDepth, Order, OrderId, OrderStatus, OrderType, Side, TimeInForce, Trade,
+};
 use chrono::Utc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -278,6 +280,58 @@ impl ExecutionEngine {
         } else {
             Err(ExecutionError::OrderNotFound(order_id))
         }
+    }
+
+    pub fn get_order(&self, symbol: &str, order_id: OrderId) -> Option<Order> {
+        let books = self.books.read();
+        books.get(symbol).and_then(|b| b.get_order(order_id).cloned())
+    }
+
+    pub fn fill_resting_order(
+        &self,
+        symbol: &str,
+        order_id: OrderId,
+        fill_price: f64,
+        fill_qty: f64,
+        taker_account_id: &str,
+    ) -> Result<Option<Trade>, ExecutionError> {
+        let mut books = self.books.write();
+        let book = books
+            .get_mut(symbol)
+            .ok_or_else(|| ExecutionError::SymbolNotRegistered(symbol.to_string()))?;
+
+        let now = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let trade = book.fill_order(order_id, fill_qty, fill_price, taker_account_id, now);
+
+        if let Some(ref t) = trade {
+            let mut pos_mgr = self.position_manager.write();
+            // Update maker position (our resting order)
+            pos_mgr.on_trade(&t.maker_account_id, t, t.side.opposite());
+            // Update taker position (counterparty)
+            pos_mgr.on_trade(&t.taker_account_id, t, t.side);
+            pos_mgr.mark_to_market(symbol, t.price);
+
+            self.event_bus.publish(EngineEvent::TradeExecuted(t.clone()));
+            self.event_bus.publish(EngineEvent::OrderFilled {
+                order_id: t.maker_order_id,
+                client_order_id: None,
+                symbol: symbol.to_string(),
+                trade: t.clone(),
+                remaining_qty: 0.0,
+            });
+
+            if let Some(pos) = pos_mgr.get_position(&t.maker_account_id, symbol) {
+                self.event_bus.publish(EngineEvent::PositionUpdated {
+                    symbol: symbol.to_string(),
+                    quantity: pos.quantity,
+                    avg_entry_price: pos.avg_entry_price,
+                    unrealized_pnl: pos.unrealized_pnl,
+                    realized_pnl: pos.realized_pnl,
+                });
+            }
+        }
+
+        Ok(trade)
     }
 
     pub fn get_depth(&self, symbol: &str, levels: usize) -> Option<MarketDepth> {

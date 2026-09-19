@@ -39,6 +39,7 @@ class KrakenTrade:
     side: str  # "BUY" or "SELL"
     order_type: str  # "MARKET" or "LIMIT"
     trade_id: int
+    seq: int = 0
 
 
 @dataclass
@@ -47,6 +48,7 @@ class KrakenBookDelta:
     side: str  # "BUY" or "SELL"
     price: float
     quantity: float  # 0.0 indicates level was removed/cancelled
+    seq: int = 0
 
 
 @dataclass
@@ -57,6 +59,45 @@ class KrakenMarketSession:
     asks: list[tuple[float, float]]  # (price, quantity)
     trades: list[KrakenTrade]
     deltas: list[KrakenBookDelta] | None = None
+
+
+def normalize_kraken_ws_pair(pair: str) -> str:
+    """Normalizes symbol to Kraken WebSocket API v2 format with slash, e.g. ETH/USD."""
+    p = pair.upper().strip()
+    if "/" in p:
+        return p
+    if "-" in p:
+        return p.replace("-", "/")
+    if "_" in p:
+        return p.replace("_", "/")
+    for quote in ("USDT", "USDC", "USD", "EUR", "GBP", "JPY", "CAD", "CHF", "AUD", "BTC", "ETH"):
+        if p.endswith(quote) and len(p) > len(quote):
+            return f"{p[: -len(quote)]}/{quote}"
+    return p
+
+
+def normalize_kraken_rest_pair(pair: str) -> str:
+    """Normalizes symbol to Kraken REST API format without slash, e.g. ETHUSD."""
+    return pair.upper().strip().replace("/", "").replace("-", "").replace("_", "")
+
+
+def extract_kraken_pair_result(data: dict[str, Any], rest_pair: str) -> Any:
+    """Extracts pair data from Kraken REST response without brittle key guessing."""
+    if rest_pair in data:
+        return data[rest_pair]
+    # Check known Kraken prefixes: X/Z (e.g. XETHZUSD, XXBTZUSD)
+    for key, val in data.items():
+        if key in ("last", "count"):
+            continue
+        clean_key = key.replace("X", "").replace("Z", "")
+        clean_target = rest_pair.replace("X", "").replace("Z", "")
+        if clean_key == clean_target or key == rest_pair:
+            return val
+    # Fallback to the first non-metadata dictionary entry
+    candidates = [k for k in data if k not in ("last", "count")]
+    if candidates:
+        return data[candidates[0]]
+    raise KeyError(f"Pair '{rest_pair}' not found in Kraken response keys: {list(data.keys())}")
 
 
 class KrakenClient:
@@ -109,18 +150,18 @@ class KrakenClient:
 
     def fetch_depth(self, pair: str = "ETHUSD", count: int = 100) -> dict[str, Any]:
         """Fetches current L2 order book depth (top `count` bids and asks)."""
-        res = self._get("Depth", {"pair": pair, "count": count})
-        pair_key = next(k for k in res.keys() if k != "last")
-        return res[pair_key]
+        rest_pair = normalize_kraken_rest_pair(pair)
+        res = self._get("Depth", {"pair": rest_pair, "count": count})
+        return extract_kraken_pair_result(res, rest_pair)
 
     def fetch_trades(self, pair: str = "ETHUSD", since: int | None = None) -> list[Any]:
         """Fetches recent public trades (single page up to 1,000 trades)."""
-        params: dict[str, Any] = {"pair": pair}
+        rest_pair = normalize_kraken_rest_pair(pair)
+        params: dict[str, Any] = {"pair": rest_pair}
         if since is not None:
             params["since"] = since
         res = self._get("Trades", params)
-        pair_key = next(k for k in res.keys() if k != "last")
-        return res[pair_key]
+        return extract_kraken_pair_result(res, rest_pair)
 
     @staticmethod
     def save_to_parquet(
@@ -152,6 +193,7 @@ class KrakenClient:
         trade_prices = [t.price for t in session.trades]
         trade_qtys = [t.quantity for t in session.trades]
         trade_ts = [t.timestamp for t in session.trades]
+        trade_seqs = [t.seq for t in session.trades]
         trade_sides = [t.side for t in session.trades]
         trade_types = [t.order_type for t in session.trades]
         trade_ids = [t.trade_id for t in session.trades]
@@ -161,28 +203,31 @@ class KrakenClient:
                 pa.array(trade_prices, type=pa.float64()),
                 pa.array(trade_qtys, type=pa.float64()),
                 pa.array(trade_ts, type=pa.float64()),
+                pa.array(trade_seqs, type=pa.int64()),
                 pa.array(trade_sides, type=pa.string()),
                 pa.array(trade_types, type=pa.string()),
                 pa.array(trade_ids, type=pa.int64()),
             ],
-            names=["price", "quantity", "timestamp", "side", "order_type", "trade_id"],
+            names=["price", "quantity", "timestamp", "seq", "side", "order_type", "trade_id"],
         )
         pq.write_table(trades_table, trades_file, compression="snappy")
 
         # 3. Optional Deltas Table
         if session.deltas and deltas_file:
             d_ts = [d.timestamp for d in session.deltas]
+            d_seqs = [d.seq for d in session.deltas]
             d_sides = [d.side for d in session.deltas]
             d_prices = [d.price for d in session.deltas]
             d_qtys = [d.quantity for d in session.deltas]
             deltas_table = pa.Table.from_arrays(
                 [
                     pa.array(d_ts, type=pa.float64()),
+                    pa.array(d_seqs, type=pa.int64()),
                     pa.array(d_sides, type=pa.string()),
                     pa.array(d_prices, type=pa.float64()),
                     pa.array(d_qtys, type=pa.float64()),
                 ],
-                names=["timestamp", "side", "price", "quantity"],
+                names=["timestamp", "seq", "side", "price", "quantity"],
             )
             pq.write_table(deltas_table, deltas_file, compression="snappy")
 
@@ -215,12 +260,19 @@ class KrakenClient:
         t_prices = trades_table["price"].to_pylist()
         t_qtys = trades_table["quantity"].to_pylist()
         t_ts = trades_table["timestamp"].to_pylist()
+        t_seqs = (
+            trades_table["seq"].to_pylist()
+            if "seq" in trades_table.column_names
+            else [0] * len(t_ts)
+        )
         t_sides = trades_table["side"].to_pylist()
         t_types = trades_table["order_type"].to_pylist()
         t_ids = trades_table["trade_id"].to_pylist()
 
         trades: list[KrakenTrade] = []
-        for p, q, ts, s, ot, tid in zip(t_prices, t_qtys, t_ts, t_sides, t_types, t_ids):
+        for p, q, ts, sq, s, ot, tid in zip(
+            t_prices, t_qtys, t_ts, t_seqs, t_sides, t_types, t_ids
+        ):
             trades.append(
                 KrakenTrade(
                     price=p,
@@ -229,6 +281,7 @@ class KrakenClient:
                     side=s,
                     order_type=ot,
                     trade_id=tid,
+                    seq=sq,
                 )
             )
 
@@ -236,12 +289,17 @@ class KrakenClient:
         if deltas_file and Path(deltas_file).exists():
             deltas_table = pq.read_table(deltas_file)
             d_ts = deltas_table["timestamp"].to_pylist()
+            d_seqs = (
+                deltas_table["seq"].to_pylist()
+                if "seq" in deltas_table.column_names
+                else [0] * len(d_ts)
+            )
             d_sides = deltas_table["side"].to_pylist()
             d_prices = deltas_table["price"].to_pylist()
             d_qtys = deltas_table["quantity"].to_pylist()
             deltas = [
-                KrakenBookDelta(timestamp=ts, side=s, price=p, quantity=q)
-                for ts, s, p, q in zip(d_ts, d_sides, d_prices, d_qtys)
+                KrakenBookDelta(timestamp=ts, seq=sq, side=s, price=p, quantity=q)
+                for ts, sq, s, p, q in zip(d_ts, d_seqs, d_sides, d_prices, d_qtys)
             ]
 
         captured_at = trades[0].timestamp if trades else time.time()
@@ -351,21 +409,6 @@ class KrakenClient:
         return cls.load_from_json(path)
 
 
-def normalize_kraken_ws_pair(pair: str) -> str:
-    """Normalizes symbol to Kraken WebSocket API v2 format with slash, e.g. ETH/USD."""
-    p = pair.upper().strip()
-    if "/" in p:
-        return p
-    if "-" in p:
-        return p.replace("-", "/")
-    if "_" in p:
-        return p.replace("_", "/")
-    for quote in ("USDT", "USDC", "USD", "EUR", "GBP", "JPY", "CAD", "CHF", "AUD", "BTC", "ETH"):
-        if p.endswith(quote) and len(p) > len(quote):
-            return f"{p[: -len(quote)]}/{quote}"
-    return p
-
-
 class KrakenWebSocketRecorder:
     """Streams and records authentic live Level 2 order book snapshots, deltas,
     and market trades from Kraken WebSocket API v2 directly to Apache Parquet.
@@ -403,6 +446,7 @@ class KrakenWebSocketRecorder:
         delta_schema = pa.schema(
             [
                 ("timestamp", pa.float64()),
+                ("seq", pa.int64()),
                 ("side", pa.string()),
                 ("price", pa.float64()),
                 ("quantity", pa.float64()),
@@ -413,6 +457,7 @@ class KrakenWebSocketRecorder:
                 ("price", pa.float64()),
                 ("quantity", pa.float64()),
                 ("timestamp", pa.float64()),
+                ("seq", pa.int64()),
                 ("side", pa.string()),
                 ("order_type", pa.string()),
                 ("trade_id", pa.int64()),
@@ -430,6 +475,7 @@ class KrakenWebSocketRecorder:
         trade_buffer: list[KrakenTrade] = []
 
         captured_at = time.time()
+        monotonic_seq = 0
         update_count = 0
         last_progress_print = 0
         last_flush_time = time.time()
@@ -441,6 +487,7 @@ class KrakenWebSocketRecorder:
                 d_table = pa.Table.from_arrays(
                     [
                         pa.array([d.timestamp for d in delta_buffer], type=pa.float64()),
+                        pa.array([d.seq for d in delta_buffer], type=pa.int64()),
                         pa.array([d.side for d in delta_buffer], type=pa.string()),
                         pa.array([d.price for d in delta_buffer], type=pa.float64()),
                         pa.array([d.quantity for d in delta_buffer], type=pa.float64()),
@@ -456,6 +503,7 @@ class KrakenWebSocketRecorder:
                         pa.array([t.price for t in trade_buffer], type=pa.float64()),
                         pa.array([t.quantity for t in trade_buffer], type=pa.float64()),
                         pa.array([t.timestamp for t in trade_buffer], type=pa.float64()),
+                        pa.array([t.seq for t in trade_buffer], type=pa.int64()),
                         pa.array([t.side for t in trade_buffer], type=pa.string()),
                         pa.array([t.order_type for t in trade_buffer], type=pa.string()),
                         pa.array([t.trade_id for t in trade_buffer], type=pa.int64()),
@@ -547,8 +595,10 @@ class KrakenWebSocketRecorder:
                             upd = data_list[0]
                             ts = time.time()
                             for b in upd.get("bids", []):
+                                monotonic_seq += 1
                                 delta = KrakenBookDelta(
                                     timestamp=ts,
+                                    seq=monotonic_seq,
                                     side="BUY",
                                     price=float(b["price"]),
                                     quantity=float(b["qty"]),
@@ -557,8 +607,10 @@ class KrakenWebSocketRecorder:
                                 delta_buffer.append(delta)
                                 update_count += 1
                             for a in upd.get("asks", []):
+                                monotonic_seq += 1
                                 delta = KrakenBookDelta(
                                     timestamp=ts,
+                                    seq=monotonic_seq,
                                     side="SELL",
                                     price=float(a["price"]),
                                     quantity=float(a["qty"]),
@@ -569,12 +621,14 @@ class KrakenWebSocketRecorder:
 
                     elif channel == "trade" and data_list:
                         for t in data_list:
+                            monotonic_seq += 1
                             ts = time.time()
                             side = "BUY" if t.get("side", "").lower() == "buy" else "SELL"
                             trade = KrakenTrade(
                                 price=float(t["price"]),
                                 quantity=float(t["qty"]),
                                 timestamp=ts,
+                                seq=monotonic_seq,
                                 side=side,
                                 order_type="MARKET",
                                 trade_id=int(t.get("trade_id", 0)),
@@ -660,7 +714,16 @@ class KrakenWebSocketRecorder:
 
 
 class KrakenOrderBookReplayer:
-    """Replays real Kraken market order book depth and trade flow through the Engine."""
+    """Replays real Kraken market order book depth and trade flow through the Engine.
+
+    Correctness Invariants:
+    1. Deltas are the SINGLE SOURCE OF TRUTH for market (KRAKEN_MAKER) liquidity.
+    2. Market taker trades do NOT execute against KRAKEN_MAKER (avoids double-counting).
+    3. Taker trades act solely as fill triggers for the strategy's resting orders
+       via `try_fill_resting(trade, resting_order_id)`.
+    4. Strict '<' ordering: Deltas stamped concurrently with or after a trade
+       are never applied prior to that trade's decision cursor.
+    """
 
     def __init__(
         self,
@@ -677,44 +740,16 @@ class KrakenOrderBookReplayer:
         self.taker_account = taker_account
         self._current_trade_idx = 0
         self._current_delta_idx = 0
-
-    def apply_deltas_until(self, timestamp: float) -> int:
-        """Applies real-time order book additions and updates up to the given timestamp."""
-        if not self.session.deltas:
-            return 0
-
-        applied = 0
-        while self._current_delta_idx < len(self.session.deltas):
-            delta = self.session.deltas[self._current_delta_idx]
-            if delta.timestamp > timestamp:
-                break
-
-            self._current_delta_idx += 1
-            applied += 1
-
-            if delta.quantity > 0.0:
-                try:
-                    self.engine.submit_order(
-                        symbol=self.symbol,
-                        side=delta.side,
-                        order_type="LIMIT",
-                        price=delta.price,
-                        quantity=delta.quantity,
-                        time_in_force="GTC",
-                        account_id=self.maker_account,
-                    )
-                except Exception:
-                    pass
-
-        return applied
+        self.maker_orders: dict[tuple[str, float], int] = {}  # (side, price) -> order_id
 
     def seed_initial_book(self) -> None:
         """Seeds the trading engine's order book with Kraken's authentic bid/ask ladders."""
+        self.maker_orders.clear()
         # Insert bids from lowest to highest so higher bids rest properly in price-time queue
         for price, qty in reversed(self.session.bids):
             if qty > 0.0 and price > 0.0:
                 try:
-                    self.engine.submit_order(
+                    order = self.engine.submit_order(
                         symbol=self.symbol,
                         side="BUY",
                         order_type="LIMIT",
@@ -723,6 +758,7 @@ class KrakenOrderBookReplayer:
                         time_in_force="GTC",
                         account_id=self.maker_account,
                     )
+                    self.maker_orders[("BUY", price)] = order.id
                 except Exception:
                     pass
 
@@ -730,7 +766,7 @@ class KrakenOrderBookReplayer:
         for price, qty in reversed(self.session.asks):
             if qty > 0.0 and price > 0.0:
                 try:
-                    self.engine.submit_order(
+                    order = self.engine.submit_order(
                         symbol=self.symbol,
                         side="SELL",
                         order_type="LIMIT",
@@ -739,35 +775,119 @@ class KrakenOrderBookReplayer:
                         time_in_force="GTC",
                         account_id=self.maker_account,
                     )
+                    self.maker_orders[("SELL", price)] = order.id
                 except Exception:
                     pass
+
+    def apply_deltas_until(self, timestamp: float, seq: int | None = None) -> int:
+        """Applies order book additions and updates strictly up to timestamp/seq.
+
+        Uses strict '<' ordering: deltas stamped at or after the trade's timestamp/seq
+        are not applied, preventing lookahead bias into the trade's aftermath.
+        """
+        if not self.session.deltas:
+            return 0
+
+        applied = 0
+        while self._current_delta_idx < len(self.session.deltas):
+            delta = self.session.deltas[self._current_delta_idx]
+
+            # Strict '<' lookahead check
+            if seq is not None and delta.seq > 0 and seq > 0:
+                if delta.timestamp > timestamp:
+                    break
+                if delta.timestamp == timestamp and delta.seq >= seq:
+                    break
+            else:
+                if delta.timestamp >= timestamp:
+                    break
+
+            self._current_delta_idx += 1
+            applied += 1
+
+            # 1. Cancel prior maker resting order at this price level if present
+            prior_id = self.maker_orders.pop((delta.side, delta.price), None)
+            if prior_id is not None:
+                try:
+                    self.engine.cancel_order(self.symbol, prior_id)
+                except Exception:
+                    pass
+
+            # 2. Place updated resting maker order if delta has positive quantity
+            if delta.quantity > 0.0:
+                try:
+                    order = self.engine.submit_order(
+                        symbol=self.symbol,
+                        side=delta.side,
+                        order_type="LIMIT",
+                        price=delta.price,
+                        quantity=delta.quantity,
+                        time_in_force="GTC",
+                        account_id=self.maker_account,
+                    )
+                    self.maker_orders[(delta.side, delta.price)] = order.id
+                except Exception:
+                    pass
+
+        return applied
+
+    def try_fill_resting(self, trade: KrakenTrade, resting_order_id: int | None) -> Any | None:
+        """Checks whether a real market taker trade crossed the strategy's resting order.
+
+        If crossed, executes a fill solely against the resting order via fill_resting_order.
+        Does NOT touch KRAKEN_MAKER liquidity (deltas are the single source of truth).
+        """
+        if resting_order_id is None:
+            return None
+
+        order = self.engine.get_order(self.symbol, resting_order_id)
+        if order is None or not order.is_active():
+            return None
+
+        order_side = str(order.side).upper()
+        is_resting_buy = "BUY" in order_side
+        is_resting_sell = "SELL" in order_side
+
+        crossed = False
+        # Market SELL trade crosses resting BUY order if trade.price <= order.price
+        if is_resting_buy and trade.side == "SELL" and trade.price <= order.price:
+            crossed = True
+        # Market BUY trade crosses resting SELL order if trade.price >= order.price
+        elif is_resting_sell and trade.side == "BUY" and trade.price >= order.price:
+            crossed = True
+
+        if not crossed:
+            return None
+
+        fill_qty = min(trade.quantity, order.remaining_quantity)
+        if fill_qty <= 1e-9:
+            return None
+
+        try:
+            return self.engine.fill_resting_order(
+                symbol=self.symbol,
+                order_id=resting_order_id,
+                fill_price=order.price,
+                fill_quantity=fill_qty,
+                taker_account_id=self.taker_account,
+            )
+        except Exception:
+            return None
 
     def has_next_trade(self) -> bool:
         return self._current_trade_idx < len(self.session.trades)
 
-    def replay_next_trade(self) -> KrakenTrade | None:
-        """Replays the next real market taker trade through the engine."""
+    def advance_trade(self) -> KrakenTrade | None:
+        """Advances the trade cursor without executing against the book."""
         if not self.has_next_trade():
             return None
-
         trade = self.session.trades[self._current_trade_idx]
         self._current_trade_idx += 1
-
-        # Real market taker flow crosses the book as a MARKET IOC order
-        try:
-            self.engine.submit_order(
-                symbol=self.symbol,
-                side=trade.side,
-                order_type="MARKET",
-                price=0.0,
-                quantity=trade.quantity,
-                time_in_force="IOC",
-                account_id=self.taker_account,
-            )
-        except Exception:
-            pass
-
         return trade
+
+    def replay_next_trade(self) -> KrakenTrade | None:
+        """Deprecated legacy method: advances the trade cursor without double-counting."""
+        return self.advance_trade()
 
     @property
     def total_trades(self) -> int:

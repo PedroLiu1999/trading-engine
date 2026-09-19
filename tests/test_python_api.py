@@ -179,3 +179,37 @@ def test_event_bus_polling(engine):
     assert len(events) > 0
     parsed = [json.loads(e) for e in events]
     assert any("OrderSubmitted" in e for e in parsed)
+
+
+def test_fill_resting_order(engine):
+    # Place resting limit buy order for 1.0 BTC @ $50,000 under STRAT
+    order = engine.submit_order(
+        symbol="BTC-USDT",
+        side="BUY",
+        order_type="LIMIT",
+        price=50_000.0,
+        quantity=1.0,
+        account_id="STRAT",
+    )
+    assert order.status == OrderStatus.New
+    assert order.remaining_quantity == 1.0
+
+    # Fill 0.4 BTC @ $50,000 from external taker
+    trade = engine.fill_resting_order("BTC-USDT", order.id, 50_000.0, 0.4, "EXT_TAKER")
+    assert trade is not None
+    assert trade.quantity == 0.4
+    assert trade.price == 50_000.0
+    assert trade.maker_account_id == "STRAT"
+    assert trade.taker_account_id == "EXT_TAKER"
+
+    pos = engine.get_position("BTC-USDT", account_id="STRAT")
+    assert pos is not None
+    assert abs(pos.quantity - 0.4) < 1e-4
+
+    # Fill remaining 0.6 BTC @ $50,000
+    trade2 = engine.fill_resting_order("BTC-USDT", order.id, 50_000.0, 0.6, "EXT_TAKER")
+    assert trade2 is not None
+    assert trade2.quantity == 0.6
+
+    pos2 = engine.get_position("BTC-USDT", account_id="STRAT")
+    assert abs(pos2.quantity - 1.0) < 1e-4

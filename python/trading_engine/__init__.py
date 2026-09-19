@@ -23,6 +23,8 @@ from .kraken import (
     KrakenOrderBookReplayer,
     KrakenTrade,
     KrakenWebSocketRecorder,
+    normalize_kraken_rest_pair,
+    normalize_kraken_ws_pair,
 )
 
 __all__ = [
@@ -46,4 +48,6 @@ __all__ = [
     "Side",
     "TimeInForce",
     "Trade",
+    "normalize_kraken_rest_pair",
+    "normalize_kraken_ws_pair",
 ]

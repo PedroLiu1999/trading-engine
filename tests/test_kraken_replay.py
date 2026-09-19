@@ -60,8 +60,10 @@ def test_kraken_session_parquet_roundtrip():
         assert loaded.trades[0].trade_id == 101
 
 
-def test_kraken_order_book_replayer():
-    """Verifies that KrakenOrderBookReplayer seeds the book and replays trades correctly."""
+def test_kraken_order_book_replayer_try_fill_resting():
+    """Verifies that try_fill_resting fills resting orders without mutating
+    KRAKEN_MAKER liquidity.
+    """
     risk = RiskConfig(
         max_order_qty=100.0,
         max_order_notional=1_000_000.0,
@@ -80,12 +82,13 @@ def test_kraken_order_book_replayer():
         bids=[(3000.0, 2.0), (2999.0, 5.0)],
         asks=[(3001.0, 3.0), (3002.0, 6.0)],
         trades=[
-            # Market buy 1.5 ETH -> should consume 1.5 from ask @ 3001.0
+            # Market sell 1.5 ETH @ 3000.0 -> crosses resting buy @ 3000.0
             KrakenTrade(
-                price=3001.0,
+                price=3000.0,
                 quantity=1.5,
                 timestamp=1700000001.0,
-                side="BUY",
+                seq=5,
+                side="SELL",
                 order_type="MARKET",
                 trade_id=1,
             ),
@@ -107,31 +110,43 @@ def test_kraken_order_book_replayer():
     assert depth is not None
     assert depth.best_bid() == 3000.0
     assert depth.best_ask() == 3001.0
+    assert depth.bids[0].quantity == 2.0
 
-    # 2. Replay real taker trade
+    # 2. Strategy submits a resting BUY order at 3000.0
+    strat_order = engine.submit_order(
+        symbol="ETH-USDT",
+        side="BUY",
+        order_type="LIMIT",
+        price=3000.0,
+        quantity=1.0,
+        time_in_force="GTC",
+        account_id="STRAT_ACCT",
+    )
+    assert strat_order.id > 0
+
+    # 3. Market taker sell trade crosses strategy's resting order
     assert replayer.has_next_trade()
-    replayed = replayer.replay_next_trade()
-    assert replayed is not None
-    assert replayed.quantity == 1.5
+    trade = session.trades[0]
+    fill = replayer.try_fill_resting(trade, strat_order.id)
+    assert fill is not None
+    assert fill.quantity == 1.0
+    assert fill.price == 3000.0
 
-    # 3. Check remaining ask depth
+    # Strategy position is updated
+    strat_pos = engine.get_position("ETH-USDT", account_id="STRAT_ACCT")
+    assert strat_pos is not None
+    assert abs(strat_pos.quantity - 1.0) < 1e-4
+
+    # Crucial P0 test: KRAKEN_MAKER liquidity is NOT double-counted / depleted by the taker trade!
     depth_after = engine.get_depth("ETH-USDT", levels=2)
     assert depth_after is not None
-    assert depth_after.best_ask() == 3001.0
-    # Remaining ask quantity at 3001.0 should be 3.0 - 1.5 = 1.5
-    assert abs(depth_after.asks[0].quantity - 1.5) < 1e-4
-
-    # 4. Check account ledger attribution
-    maker_acct = engine.get_account("KRAKEN_MAKER")
-    taker_acct = engine.get_account("KRAKEN_TAKER")
-    assert maker_acct is not None
-    assert taker_acct is not None
-    # Zero-sum check
-    assert abs(maker_acct.realized_pnl + taker_acct.realized_pnl) < 1e-4
+    # Maker bids at 3000.0 remain 2.0 (only deltas mutate maker liquidity)
+    maker_bid_qty = next(b.quantity for b in depth_after.bids if b.price == 3000.0)
+    assert abs(maker_bid_qty - 2.0) < 1e-4
 
 
 def test_kraken_session_deltas_roundtrip():
-    """Verifies that KrakenBookDelta saves and loads from Parquet correctly."""
+    """Verifies that KrakenBookDelta saves and loads from Parquet correctly with seq."""
     session = KrakenMarketSession(
         pair="ETHUSD",
         captured_at=1700000000.0,
@@ -142,14 +157,15 @@ def test_kraken_session_deltas_roundtrip():
                 price=2601.0,
                 quantity=0.5,
                 timestamp=1700000005.0,
+                seq=10,
                 side="BUY",
                 order_type="MARKET",
                 trade_id=1,
             )
         ],
         deltas=[
-            KrakenBookDelta(timestamp=1700000002.0, side="BUY", price=2599.5, quantity=3.0),
-            KrakenBookDelta(timestamp=1700000003.0, side="SELL", price=2602.0, quantity=4.5),
+            KrakenBookDelta(timestamp=1700000002.0, seq=1, side="BUY", price=2599.5, quantity=3.0),
+            KrakenBookDelta(timestamp=1700000003.0, seq=2, side="SELL", price=2602.0, quantity=4.5),
         ],
     )
 
@@ -167,14 +183,18 @@ def test_kraken_session_deltas_roundtrip():
         assert len(loaded.deltas) == 2
         assert loaded.deltas[0].price == 2599.5
         assert loaded.deltas[0].quantity == 3.0
+        assert loaded.deltas[0].seq == 1
         assert loaded.deltas[0].side == "BUY"
         assert loaded.deltas[1].price == 2602.0
         assert loaded.deltas[1].quantity == 4.5
+        assert loaded.deltas[1].seq == 2
         assert loaded.deltas[1].side == "SELL"
 
 
-def test_kraken_order_book_replayer_with_deltas():
-    """Verifies that replayer applies real-time order book deltas in chronological order."""
+def test_kraken_order_book_replayer_strict_deltas():
+    """Verifies that replayer applies real-time deltas strictly before trades with
+    seq tie-breaking.
+    """
     engine = Engine(initial_balance=100_000.0, leverage=2.0)
     engine.register_symbol("ETH-USDT", tick_size=0.10, lot_size=0.01)
 
@@ -188,16 +208,25 @@ def test_kraken_order_book_replayer_with_deltas():
                 price=3002.0,
                 quantity=1.0,
                 timestamp=1700000010.0,
+                seq=10,
                 side="BUY",
                 order_type="MARKET",
                 trade_id=1,
             )
         ],
         deltas=[
-            # Maker introduces tighter ask @ 3002.0 before the trade
-            KrakenBookDelta(timestamp=1700000005.0, side="SELL", price=3002.0, quantity=2.0),
-            # Maker introduces ask @ 3003.0 AFTER the trade
-            KrakenBookDelta(timestamp=1700000015.0, side="SELL", price=3003.0, quantity=5.0),
+            # Delta 1: strictly before (timestamp < trade.timestamp)
+            KrakenBookDelta(timestamp=1700000005.0, seq=5, side="SELL", price=3002.0, quantity=2.0),
+            # Delta 2: same timestamp but before trade (seq=8 < trade.seq=10)
+            KrakenBookDelta(timestamp=1700000010.0, seq=8, side="BUY", price=3001.0, quantity=1.0),
+            # Delta 3: same timestamp but AFTER trade (seq=12 >= trade.seq=10) -> must NOT apply
+            KrakenBookDelta(
+                timestamp=1700000010.0, seq=12, side="SELL", price=3001.5, quantity=4.0
+            ),
+            # Delta 4: strictly after (timestamp > trade.timestamp) -> must NOT apply
+            KrakenBookDelta(
+                timestamp=1700000015.0, seq=15, side="SELL", price=3003.0, quantity=5.0
+            ),
         ],
     )
 
@@ -208,26 +237,30 @@ def test_kraken_order_book_replayer_with_deltas():
     )
     replayer.seed_initial_book()
 
-    # Before applying deltas up to 1700000010, best ask is 3005.0
+    # Initial state: best ask 3005.0, best bid 3000.0
     depth0 = engine.get_depth("ETH-USDT", levels=2)
     assert depth0 is not None
     assert depth0.best_ask() == 3005.0
+    assert depth0.best_bid() == 3000.0
 
-    # Apply deltas up to trade timestamp 1700000010.0
-    applied = replayer.apply_deltas_until(1700000010.0)
-    assert applied == 1
+    # Apply deltas strictly prior to trade (timestamp 1700000010.0, seq 10)
+    applied = replayer.apply_deltas_until(1700000010.0, seq=10)
+    # Delta 1 and Delta 2 should apply; Delta 3 and Delta 4 must NOT apply
+    assert applied == 2
 
-    # Now best ask should be 3002.0 from the applied delta
     depth1 = engine.get_depth("ETH-USDT", levels=2)
     assert depth1 is not None
+    # Best ask should be 3002.0 from Delta 1
     assert depth1.best_ask() == 3002.0
+    # Best bid should be 3001.0 from Delta 2
+    assert depth1.best_bid() == 3001.0
+    # Delta 3 (ask @ 3001.5) must NOT be present (no lookahead!)
+    assert all(a.price != 3001.5 for a in depth1.asks)
 
-    # Trade executes against new best ask 3002.0
-    replayed = replayer.replay_next_trade()
-    assert replayed is not None
+    # Now apply deltas after trade (e.g. timestamp 1700000020.0)
+    applied2 = replayer.apply_deltas_until(1700000020.0, seq=20)
+    assert applied2 == 2  # Remaining 2 deltas applied
 
-    depth2 = engine.get_depth("ETH-USDT", levels=2)
+    depth2 = engine.get_depth("ETH-USDT", levels=3)
     assert depth2 is not None
-    # 2.0 - 1.0 = 1.0 remaining at 3002.0
-    assert depth2.best_ask() == 3002.0
-    assert abs(depth2.asks[0].quantity - 1.0) < 1e-4
+    assert any(a.price == 3001.5 for a in depth2.asks)

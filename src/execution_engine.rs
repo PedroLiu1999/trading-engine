@@ -2,9 +2,7 @@ use crate::event_bus::{EngineEvent, EventBus};
 use crate::order_book::OrderBook;
 use crate::position_manager::{Account, Position, PositionManager};
 use crate::risk_manager::{RiskConfig, RiskManager, RiskRejection};
-use crate::types::{
-    MarketDepth, Order, OrderId, OrderStatus, OrderType, Side, TimeInForce, Trade,
-};
+use crate::types::{MarketDepth, Order, OrderId, OrderStatus, OrderType, Side, TimeInForce, Trade};
 use chrono::Utc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -284,7 +282,9 @@ impl ExecutionEngine {
 
     pub fn get_order(&self, symbol: &str, order_id: OrderId) -> Option<Order> {
         let books = self.books.read();
-        books.get(symbol).and_then(|b| b.get_order(order_id).cloned())
+        books
+            .get(symbol)
+            .and_then(|b| b.get_order(order_id).cloned())
     }
 
     pub fn fill_resting_order(
@@ -311,7 +311,8 @@ impl ExecutionEngine {
             pos_mgr.on_trade(&t.taker_account_id, t, t.side);
             pos_mgr.mark_to_market(symbol, t.price);
 
-            self.event_bus.publish(EngineEvent::TradeExecuted(t.clone()));
+            self.event_bus
+                .publish(EngineEvent::TradeExecuted(t.clone()));
             self.event_bus.publish(EngineEvent::OrderFilled {
                 order_id: t.maker_order_id,
                 client_order_id: None,

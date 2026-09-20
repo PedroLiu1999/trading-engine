@@ -133,7 +133,13 @@ impl PyEngine {
         taker_account_id: &str,
     ) -> PyResult<Option<PyTrade>> {
         self.engine
-            .fill_resting_order(symbol, order_id, fill_price, fill_quantity, taker_account_id)
+            .fill_resting_order(
+                symbol,
+                order_id,
+                fill_price,
+                fill_quantity,
+                taker_account_id,
+            )
             .map(|opt| opt.map(PyTrade::from))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
